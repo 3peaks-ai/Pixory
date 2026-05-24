@@ -339,10 +339,12 @@ async function textEmbed(query) {
 }
 
 // ── Thumbnail URL ────────────────────────────────────────────────────────────────
+const IS_LOCAL = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
+
 function thumbUrl(relPath) {
-  // Must match _thumb_name() in indexer.py
+  if (!IS_LOCAL) return null;  // on mobile/remote: no localhost thumbs
   const safe = relPath.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 120);
-  return `http://localhost:8765/thumbs/${safe}.jpg`;
+  return `http://127.0.0.1:8765/thumbs/${safe}.jpg`;
 }
 
 // ── Cosine similarity (batch, optimised) ─────────────────────────────────────
@@ -395,7 +397,9 @@ let cachedDates  = null;
 
 async function init() {
   try {
+    setLoading("Step 1: Opening local storage…");
     db = await openDB();
+    setLoading("Step 2: Loading AI model…");
     await loadCLIP();
 
     const count = await countVectors(db);
@@ -410,7 +414,8 @@ async function init() {
     document.getElementById("status-bar").textContent =
       `${count} photos indexed — try "beach sunset" or "family dinner"`;
   } catch (err) {
-    showError(`Error: ${err.message}\n\nCheck F12 → Console for details.\n\nCommon fix: disable VPN or try a different browser.`);
+    const detail = `${err.name}: ${err.message}`;
+    showError(`Step failed: ${detail}`);
   }
 }
 
@@ -500,23 +505,36 @@ function renderResults(results, query) {
     const name = r.path.split(/[\/]/).pop();
     const url  = thumbUrl(r.path);
 
+    const imgHtml = url
+      ? `<img src="${url}" alt="${name}"
+              onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"
+              style="width:100%;height:100%;object-fit:cover;display:block">
+         <div style="display:none;width:100%;height:100%;align-items:center;
+                     justify-content:center;background:#161b22;font-size:10px;
+                     color:#555;padding:4px;text-align:center;word-break:break-all">${name}</div>`
+      : `<div style="width:100%;height:100%;display:flex;flex-direction:column;
+                     align-items:center;justify-content:center;background:#161b22;
+                     padding:6px;gap:4px">
+           <div style="font-size:18px">🖼</div>
+           <div style="font-size:9px;color:#555;text-align:center;word-break:break-all">${name}</div>
+         </div>`;
     item.innerHTML = `
-      <img src="${url}" alt="${name}"
-           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"
-           style="width:100%;height:100%;object-fit:cover;display:block">
-      <div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;
-                  background:#161b22;font-size:10px;color:#555;padding:4px;text-align:center;
-                  word-break:break-all">${name}</div>
+      ${imgHtml}
       <span class="score">${(r.score * 100).toFixed(0)}%</span>
       <span class="date">${r.date}</span>
     `;
 
-    // Click: lightbox
+    // Click: lightbox (local) or show path (mobile)
     item.addEventListener("click", () => {
-      const lb = document.getElementById("lightbox");
-      document.getElementById("lightbox-img").src  = url;
-      document.getElementById("lightbox-name").textContent = r.path;
-      lb.style.display = "flex";
+      if (url) {
+        const lb = document.getElementById("lightbox");
+        document.getElementById("lightbox-img").src  = url;
+        document.getElementById("lightbox-name").textContent = r.path;
+        lb.style.display = "flex";
+      } else if (tg) {
+        tg.showPopup({ title: "File", message: r.path,
+                       buttons: [{ type: "close" }] });
+      }
     });
 
     grid.appendChild(item);
