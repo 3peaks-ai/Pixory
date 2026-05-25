@@ -207,6 +207,132 @@ if (tg) {
   // TODO: add /verify endpoint on Cloudflare Worker before production
 }
 
+
+// ── Encryption (AES-256-GCM + PBKDF2) ────────────────────────────────────────
+const ENCRYPT_MAGIC = "PIXENC1";
+
+function isEncrypted(buffer) {
+  if (buffer.byteLength < 7) return false;
+  const header = new TextDecoder().decode(new Uint8Array(buffer, 0, 7));
+  return header === ENCRYPT_MAGIC;
+}
+
+async function decryptVectors(encryptedBuffer, passphrase) {
+  // Format: PIXENC1(7) + salt(16) + nonce(12) + ciphertext+tag(var)
+  if (encryptedBuffer.byteLength < 7 + 16 + 12 + 16) {
+    throw new Error("File too short to be a valid encrypted shard");
+  }
+
+  const salt       = new Uint8Array(encryptedBuffer,  7, 16);
+  const nonce      = new Uint8Array(encryptedBuffer, 23, 12);
+  const ciphertext = new Uint8Array(encryptedBuffer, 35);
+
+  // Derive AES-256 key from passphrase (PBKDF2-HMAC-SHA256, 200K iterations)
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(passphrase),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+  const key = await crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 200_000, hash: "SHA-256" },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"]
+  );
+
+  // Decrypt — throws if passphrase wrong (GCM authentication failure)
+  try {
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: nonce },
+      key,
+      ciphertext
+    );
+    return plaintext;
+  } catch {
+    throw new Error("Wrong passphrase or corrupted file");
+  }
+}
+
+// Show passphrase modal, return promise that resolves with passphrase
+function askPassphrase(filename) {
+  return new Promise((resolve, reject) => {
+    // Create modal overlay
+    const overlay = document.createElement("div");
+    overlay.style.cssText = `
+      position:fixed;inset:0;background:rgba(0,0,0,0.8);
+      display:flex;align-items:center;justify-content:center;
+      z-index:1000;padding:24px;
+    `;
+
+    overlay.innerHTML = \`
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:16px;
+                  padding:28px 24px;max-width:340px;width:100%;text-align:center;">
+        <div style="font-size:28px;margin-bottom:12px;">🔒</div>
+        <h3 style="margin-bottom:8px;font-size:17px;">Encrypted Index</h3>
+        <p style="color:#8b949e;font-size:13px;margin-bottom:20px;line-height:1.5;">
+          <strong>\${filename}</strong> is encrypted.<br>
+          Enter the passphrase you set when indexing.
+        </p>
+        <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;
+                    padding:12px;margin-bottom:16px;text-align:left;">
+          <div style="color:#e67e22;font-size:12px;margin-bottom:6px;">⚠️ Remember your passphrase</div>
+          <div style="color:#8b949e;font-size:11px;line-height:1.5;">
+            Without it you cannot import this index<br>on another device or after reinstall.
+          </div>
+        </div>
+        <input id="pp-input" type="password" placeholder="Passphrase"
+          style="width:100%;background:#0d1117;border:1px solid #30363d;
+                 border-radius:8px;padding:12px;color:#e6edf3;font-size:15px;
+                 outline:none;margin-bottom:8px;" />
+        <div id="pp-error" style="color:#f85149;font-size:12px;
+             min-height:16px;margin-bottom:8px;"></div>
+        <button id="pp-ok" style="width:100%;background:#238636;color:white;
+          border:none;border-radius:10px;padding:14px;font-size:15px;
+          font-weight:600;cursor:pointer;margin-bottom:8px;">
+          Unlock
+        </button>
+        <button id="pp-cancel" style="width:100%;background:transparent;
+          color:#8b949e;border:1px solid #30363d;border-radius:10px;
+          padding:10px;font-size:13px;cursor:pointer;">
+          Cancel
+        </button>
+      </div>
+    \`;
+
+    document.body.appendChild(overlay);
+
+    const input  = overlay.querySelector("#pp-input");
+    const errEl  = overlay.querySelector("#pp-error");
+    const okBtn  = overlay.querySelector("#pp-ok");
+    const cancel = overlay.querySelector("#pp-cancel");
+
+    input.focus();
+
+    function attempt() {
+      const val = input.value.trim();
+      if (!val) { errEl.textContent = "Enter passphrase"; return; }
+      overlay.remove();
+      resolve(val);
+    }
+
+    okBtn.addEventListener("click", attempt);
+    cancel.addEventListener("click", () => {
+      overlay.remove();
+      reject(new Error("Cancelled"));
+    });
+    input.addEventListener("keydown", e => {
+      if (e.key === "Enter") attempt();
+      errEl.textContent = "";
+    });
+
+    // Allow retrying with error feedback (called from import flow)
+    overlay._setError = msg => { errEl.textContent = msg; input.value = ""; input.focus(); };
+  });
+}
+
 // ── IndexedDB ────────────────────────────────────────────────────────────────
 const DB_NAME    = "pixory3";
 const DB_VERSION = 1;
@@ -566,20 +692,51 @@ document.getElementById("file-input").addEventListener("change", async e => {
   const file = e.target.files[0];
   if (!file) return;
 
-  setLoading("Parsing vectors.bin…");
+  setLoading("Reading file…");
   try {
-    const buf = await file.arrayBuffer();
-    const { count, records } = parseVectorsBin(buf);
+    let buf = await file.arrayBuffer();
 
-    setLoading(`Storing ${count} vectors locally…`);
+    // ── Encrypted shard: prompt for passphrase ────────────────────────────
+    if (isEncrypted(buf)) {
+      setLoading("Encrypted index detected…");
+      let decrypted = null;
+      while (!decrypted) {
+        let passphrase;
+        try {
+          passphrase = await askPassphrase(file.name);
+        } catch {
+          // User cancelled
+          setState("state-import");
+          return;
+        }
+        setLoading("Decrypting… (this takes a few seconds)");
+        try {
+          decrypted = await decryptVectors(buf, passphrase);
+        } catch (decErr) {
+          // Wrong passphrase — show error inline in modal (re-prompt)
+          // Since modal is gone, show error and re-ask
+          setLoading("Wrong passphrase. Try again…");
+          await new Promise(r => setTimeout(r, 800));
+          // Loop continues → askPassphrase again
+        }
+      }
+      buf = decrypted;
+    }
+
+    // ── Parse (v1/v2/v3) ─────────────────────────────────────────────────
+    setLoading("Parsing index…");
+    const records = parseVectorsBin(buf);
+    const count   = records.length;
+
+    setLoading("Storing " + count + " vectors locally…");
     await clearAndStore(db, records);
     await loadVectorsFromDB();
 
     setState("state-ready");
     document.getElementById("status-bar").textContent =
-      `${count} photos indexed. Try "sunset" or "birthday party".`;
+      count + " photos indexed. Try \"sunset\" or \"birthday party\".";
   } catch (err) {
-    showError(`Import failed: ${err.message}`);
+    showError("Import failed: " + err.message);
   }
 });
 
