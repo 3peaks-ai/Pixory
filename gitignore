@@ -1,0 +1,42 @@
+# Pixory 3.0 — .gitignore
+# CRITICAL: vectors and photos must NEVER be committed
+
+# ── Vector shards (contain file paths + optional thumbnails) ──────────────────
+vectors_*.bin
+vectors.bin
+
+# ── Thumbnails ────────────────────────────────────────────────────────────────
+thumbs/
+*.thumb.jpg
+
+# ── Server token (secret, auto-generated) ─────────────────────────────────────
+.pixory_token
+
+# ── TLS certificates (mkcert) ─────────────────────────────────────────────────
+*.pem
+*.key
+*.crt
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+
+# ── Test / temp ───────────────────────────────────────────────────────────────
+test_vectors/
+temp/
