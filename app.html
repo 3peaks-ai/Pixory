@@ -674,15 +674,7 @@ function showError(msg) {
   setState("state-error");
 }
 
-async function showImport() {
-  // Clear existing vectors so import starts fresh
-  if (db) {
-    try {
-      await clearAndStore(db, []);
-      cachedVecs = null; cachedPaths = null;
-      cachedDates = null; cachedThumbs = null;
-    } catch(e) {}
-  }
+function showImport() {
   setState("state-import");
 }
 
@@ -768,15 +760,8 @@ document.getElementById("file-input").addEventListener("change", async e => {
     const records = parseVectorsBin(buf);
     const count   = records.length;
 
-    // Check if we already have vectors → offer append vs replace
-    const existing = cachedVecs ? cachedVecs.length : 0;
-    if (existing > 0) {
-      setLoading("Adding " + count + " photos to existing " + existing + "…");
-      await appendToStore(db, records);
-    } else {
-      setLoading("Storing " + count + " vectors locally…");
-      await clearAndStore(db, records);
-    }
+    setLoading("Storing " + count + " vectors…");
+    await clearAndStore(db, records);
     await loadVectorsFromDB();
     const total = cachedVecs ? cachedVecs.length : count;
 
