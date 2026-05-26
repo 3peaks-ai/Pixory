@@ -664,7 +664,8 @@ function setState(id) {
 }
 
 function setLoading(msg) {
-  document.getElementById("loading-msg").textContent = msg;
+  document.getElementById("loading-msg").innerHTML =
+    msg.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/\n/g,"<br>");
   setState("state-loading");
 }
 
@@ -673,7 +674,17 @@ function showError(msg) {
   setState("state-error");
 }
 
-function showImport() { setState("state-import"); }
+async function showImport() {
+  // Clear existing vectors so import starts fresh
+  if (db) {
+    try {
+      await clearAndStore(db, []);
+      cachedVecs = null; cachedPaths = null;
+      cachedDates = null; cachedThumbs = null;
+    } catch(e) {}
+  }
+  setState("state-import");
+}
 
 // ── App init ──────────────────────────────────────────────────────────────────
 let db;
