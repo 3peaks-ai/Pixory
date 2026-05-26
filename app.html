@@ -267,13 +267,13 @@ function askPassphrase(filename) {
       z-index:1000;padding:24px;
     `;
 
-    overlay.innerHTML = \`
+    overlay.innerHTML = `
       <div style="background:#161b22;border:1px solid #30363d;border-radius:16px;
                   padding:28px 24px;max-width:340px;width:100%;text-align:center;">
         <div style="font-size:28px;margin-bottom:12px;">🔒</div>
         <h3 style="margin-bottom:8px;font-size:17px;">Encrypted Index</h3>
         <p style="color:#8b949e;font-size:13px;margin-bottom:20px;line-height:1.5;">
-          <strong>\${filename}</strong> is encrypted.<br>
+          <strong>${filename}</strong> is encrypted.<br>
           Enter the passphrase you set when indexing.
         </p>
         <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;
@@ -300,7 +300,7 @@ function askPassphrase(filename) {
           Cancel
         </button>
       </div>
-    \`;
+    `;
 
     document.body.appendChild(overlay);
 
@@ -572,19 +572,15 @@ function _parseV3(buffer, view, dim, count) {
 }
 
 async function loadCLIP() {
-  // Timer-based progress: reliable in all WebViews including Telegram
-  // (progress_callback is unreliable in WKWebView)
-  let secs = 0;
-  const timer = setInterval(() => {
-    secs++;
-    const hint = secs < 10  ? "downloading…" :
-                 secs < 40  ? "almost there…" :
-                 secs < 70  ? "taking longer on slow connection…" :
-                              "still loading, please wait…";
-    setLoading("Loading AI model  " + secs + "s  (" + hint + ")");
-  }, 1000);
-
-  setLoading("Loading AI model  0s  (first launch ~30-60s, then instant)");
+  // Note: WKWebView (Telegram/iOS) can freeze DOM during WASM compilation.
+  // We show a static message with clear expectation rather than a timer
+  // that may appear frozen.
+  setLoading(
+    "Loading AI model…\n\n" +
+    "⏳ First launch takes 30–90 seconds.\n" +
+    "Screen may look frozen — this is normal.\n" +
+    "Subsequent launches are instant (cached)."
+  );
 
   try {
     const { AutoTokenizer, CLIPTextModelWithProjection } = await import(
@@ -594,10 +590,8 @@ async function loadCLIP() {
       AutoTokenizer.from_pretrained("Xenova/clip-vit-base-patch32"),
       CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-base-patch32"),
     ]);
-    clearInterval(timer);
     setLoading("AI model ready ✓");
   } catch (err) {
-    clearInterval(timer);
     throw new Error("Model load failed: " + err.message);
   }
 }
