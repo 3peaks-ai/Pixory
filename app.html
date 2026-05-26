@@ -399,6 +399,25 @@ async function getAllVectors(db) {
   });
 }
 
+// appendToStore: ADD records without clearing existing ones
+// Used for multi-shard import (each shard appends)
+async function appendToStore(db, records) {
+  return new Promise((resolve, reject) => {
+    const tx    = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    let i = 0;
+    function next() {
+      if (i >= records.length) { resolve(); return; }
+      const req = store.add(records[i++]);
+      req.onsuccess = next;
+      req.onerror   = e => reject(e.target.error);
+    }
+    next();
+    tx.onerror = e => reject(e.target.error);
+  });
+}
+
+// clearAndStore: REPLACE all records (used for full re-import)
 async function clearAndStore(db, records) {
   return new Promise((resolve, reject) => {
     const tx    = db.transaction(STORE, "readwrite");
@@ -553,18 +572,31 @@ function _parseV3(buffer, view, dim, count) {
 }
 
 async function loadCLIP() {
-  console.log('[Pixory] Starting Transformers.js load...');
-  setLoading("Downloading AI model… (~80 MB, cached forever)");
-  const { AutoTokenizer, CLIPTextModelWithProjection } = await import(
+  setLoading("Loading AI model… (step 1/3: loading library)");
+  
+  let { AutoTokenizer, CLIPTextModelWithProjection, env } = await import(
     "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
   );
-  console.log('[Pixory] Downloading CLIP text encoder from HuggingFace...');
+
+  // Progress callback so user sees download %
+  function onProgress(p) {
+    if (p.status === "downloading") {
+      const pct = p.progress ? Math.round(p.progress) + "%" : "…";
+      const name = (p.file || "").split("/").pop() || "model";
+      setLoading("Downloading AI model " + pct + "  (" + name + ")");
+    } else if (p.status === "loading") {
+      setLoading("Loading AI model into memory…");
+    }
+  }
+
+  setLoading("Downloading AI model… (~80 MB, cached after first use)");
   [clipTokenizer, clipTextModel] = await Promise.all([
     AutoTokenizer.from_pretrained("Xenova/clip-vit-base-patch32"),
-    CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-base-patch32"),
+    CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-base-patch32",
+      { progress_callback: onProgress }),
   ]);
-  console.log('[Pixory] CLIP text encoder ready');
-  setLoading("Model ready.");
+
+  setLoading("AI model ready ✓");
 }
 
 async function textEmbed(query) {
@@ -728,13 +760,21 @@ document.getElementById("file-input").addEventListener("change", async e => {
     const records = parseVectorsBin(buf);
     const count   = records.length;
 
-    setLoading("Storing " + count + " vectors locally…");
-    await clearAndStore(db, records);
+    // Check if we already have vectors → offer append vs replace
+    const existing = cachedVecs ? cachedVecs.length : 0;
+    if (existing > 0) {
+      setLoading("Adding " + count + " photos to existing " + existing + "…");
+      await appendToStore(db, records);
+    } else {
+      setLoading("Storing " + count + " vectors locally…");
+      await clearAndStore(db, records);
+    }
     await loadVectorsFromDB();
+    const total = cachedVecs ? cachedVecs.length : count;
 
     setState("state-ready");
     document.getElementById("status-bar").textContent =
-      count + " photos indexed. Try \"sunset\" or \"birthday party\".";
+      total + " photos indexed. Try \"sunset\" or \"birthday party\".";
   } catch (err) {
     showError("Import failed: " + err.message);
   }
