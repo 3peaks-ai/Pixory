@@ -572,31 +572,34 @@ function _parseV3(buffer, view, dim, count) {
 }
 
 async function loadCLIP() {
-  setLoading("Loading AI model… (step 1/3: loading library)");
-  
-  let { AutoTokenizer, CLIPTextModelWithProjection, env } = await import(
-    "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
-  );
+  // Timer-based progress: reliable in all WebViews including Telegram
+  // (progress_callback is unreliable in WKWebView)
+  let secs = 0;
+  const timer = setInterval(() => {
+    secs++;
+    const hint = secs < 10  ? "downloading…" :
+                 secs < 40  ? "almost there…" :
+                 secs < 70  ? "taking longer on slow connection…" :
+                              "still loading, please wait…";
+    setLoading("Loading AI model  " + secs + "s  (" + hint + ")");
+  }, 1000);
 
-  // Progress callback so user sees download %
-  function onProgress(p) {
-    if (p.status === "downloading") {
-      const pct = p.progress ? Math.round(p.progress) + "%" : "…";
-      const name = (p.file || "").split("/").pop() || "model";
-      setLoading("Downloading AI model " + pct + "  (" + name + ")");
-    } else if (p.status === "loading") {
-      setLoading("Loading AI model into memory…");
-    }
+  setLoading("Loading AI model  0s  (first launch ~30-60s, then instant)");
+
+  try {
+    const { AutoTokenizer, CLIPTextModelWithProjection } = await import(
+      "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
+    );
+    [clipTokenizer, clipTextModel] = await Promise.all([
+      AutoTokenizer.from_pretrained("Xenova/clip-vit-base-patch32"),
+      CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-base-patch32"),
+    ]);
+    clearInterval(timer);
+    setLoading("AI model ready ✓");
+  } catch (err) {
+    clearInterval(timer);
+    throw new Error("Model load failed: " + err.message);
   }
-
-  setLoading("Downloading AI model… (~80 MB, cached after first use)");
-  [clipTokenizer, clipTextModel] = await Promise.all([
-    AutoTokenizer.from_pretrained("Xenova/clip-vit-base-patch32"),
-    CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-base-patch32",
-      { progress_callback: onProgress }),
-  ]);
-
-  setLoading("AI model ready ✓");
 }
 
 async function textEmbed(query) {
