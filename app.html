@@ -134,10 +134,12 @@ body {
 }
 .empty { color: #555; font-size: 14px; text-align: center; padding: 48px 16px; }
 .import-btn-small {
-  position: fixed; bottom: 20px; right: 16px;
+  position: fixed; bottom: 90px; right: 16px;
   background: #21262d; color: #8b949e;
   border: 1px solid #30363d; border-radius: 20px;
-  padding: 8px 14px; font-size: 12px; cursor: pointer;
+  padding: 10px 16px; font-size: 13px; cursor: pointer;
+  z-index: 100;
+  -webkit-tap-highlight-color: rgba(255,255,255,0.1);
 }
 </style>
 </head>
@@ -185,7 +187,7 @@ body {
   </div>
   <div class="status-bar" id="status-bar"></div>
   <div class="results-grid" id="results-grid"></div>
-  <button class="import-btn-small" onclick="showImport()">↻ Re-import</button>
+  <button class="import-btn-small" id="btn-reimport">↻ Re-import</button>
 </div>
 
 <!-- STATE: Error -->
@@ -720,6 +722,11 @@ async function loadVectorsFromDB() {
 
 
 // ── File import ───────────────────────────────────────────────────────────────
+// Bind Re-import button via event listener (more reliable than onclick in WebView)
+document.getElementById("btn-reimport").addEventListener("click", function() {
+  setState("state-import");
+});
+
 document.getElementById("file-input").addEventListener("change", async e => {
   const file = e.target.files[0];
   if (!file) return;
