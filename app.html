@@ -859,7 +859,7 @@ function cosineSimilarity(a, b) {
   return dot;
 }
 
-const SCORE_CUTOFF = 0.26;  // 0.26+ filters irrelevant results; raise if too strict
+const SCORE_CUTOFF = 0.23;  // tunable: 0.20=permissive, 0.25=strict
 
 function topK(queryVec, vectors, paths, dates, k = 20) {
   const scores = vectors
@@ -1204,10 +1204,25 @@ function makeThumbnailItem(r) {
   item.innerHTML = inner + scoreTag + dateTag + geoTag;
 
   item.addEventListener('click', () => {
-    const msg = r.path + (r.date ? '\n' + r.date : '') +
-                (r.cc ? '\n' + CC_FLAG(r.cc) + ' ' + CC_NAME(r.cc) : '');
-    if (tg) tg.showPopup({ title: name, message: msg, buttons:[{type:'close'}] });
-    else alert(msg);
+    // If serve.py token available: try to open original
+    if (_serveToken) {
+      const originalUrl = serveUrl(name, _serveToken);
+      if (tg) {
+        tg.openLink(originalUrl);
+      } else {
+        window.open(originalUrl, '_blank');
+      }
+      return;
+    }
+    // Fallback: show info popup
+    const info = [
+      name,
+      r.date || '',
+      r.cc ? CC_FLAG(r.cc) + ' ' + CC_NAME(r.cc) : '',
+      r.score !== null ? 'Score: ' + (r.score*100).toFixed(0) + '%' : ''
+    ].filter(Boolean).join('\n');
+    if (tg) tg.showPopup({ title: 'Photo info', message: info, buttons:[{type:'close'}] });
+    else alert(info);
   });
   return item;
 }
