@@ -921,10 +921,7 @@ async function loadVectorsFromDB() {
 
 
 // ── File import ───────────────────────────────────────────────────────────────
-// Bind Re-import button via event listener (more reliable than onclick in WebView)
-document.getElementById("btn-reimport").addEventListener("click", function() {
-  setState("state-import");
-});
+// Re-import handled by onclick="showImport()" on tab-reimport button
 
 document.getElementById("file-input").addEventListener("change", async e => {
   const file = e.target.files[0];
