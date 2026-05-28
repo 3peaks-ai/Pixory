@@ -65,6 +65,18 @@ body {
 .import-card p  { color: #8b949e; font-size: 13px; line-height: 1.5; }
 .import-steps   { text-align: left; margin: 16px 0; }
 .import-steps li { color: #8b949e; font-size: 12px; margin: 6px 0 6px 16px; }
+.btn-cancel {
+  margin-top: 8px;
+  background: none;
+  border: 1px solid #30363d;
+  color: #8b949e;
+  padding: 10px 20px;
+  border-radius: 10px;
+  font-size: 14px;
+  cursor: pointer;
+  width: 100%;
+}
+.btn-cancel:active { background: #21262d; }
 .btn-primary {
   display: block; width: 100%;
   background: #238636; color: white;
@@ -76,7 +88,7 @@ body {
 #file-input { display: none; }
 
 /* ── Search ── */
-#state-ready { justify-content: flex-start; padding: 0; }
+#state-ready { justify-content: flex-start; padding: 0; align-items: stretch; }
 .search-bar {
   position: sticky; top: 0; z-index: 10;
   background: var(--tg-theme-bg-color, #0d1117);
@@ -106,7 +118,8 @@ body {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 2px;
-  padding: 0 0 80px;
+  padding: 0 0 72px;
+  width: 100%;
 }
 .result-item {
   aspect-ratio: 1;
@@ -246,7 +259,11 @@ body {
     </ol>
     <input type="file" id="file-input" accept=".bin">
     <button class="btn-primary" onclick="document.getElementById('file-input').click()">
-      Import vectors.bin
+      📂 Select index file
+    </button>
+    <button id="btn-cancel-import" class="btn-cancel" style="display:none"
+            onclick="setState('state-ready')">
+      ← Back to search
     </button>
   </div>
 </div>
@@ -842,7 +859,7 @@ function cosineSimilarity(a, b) {
   return dot;
 }
 
-const SCORE_CUTOFF = 0.20;  // CLIP cosine sims typically 0.20-0.35 for good matches
+const SCORE_CUTOFF = 0.26;  // 0.26+ filters irrelevant results; raise if too strict
 
 function topK(queryVec, vectors, paths, dates, k = 20) {
   const scores = vectors
@@ -879,6 +896,10 @@ function showError(msg) {
 }
 
 function showImport() {
+  // Show cancel button only if we already have vectors loaded (user can go back)
+  const hasVectors = cachedVecs && cachedVecs.length > 0;
+  const cancelBtn = document.getElementById('btn-cancel-import');
+  if (cancelBtn) cancelBtn.style.display = hasVectors ? '' : 'none';
   setState("state-import");
 }
 
@@ -1198,6 +1219,15 @@ const statusBar   = document.getElementById("status-bar");
 
 let searchTimer = null;
 
+searchInput.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    searchInput.blur();
+    const q = searchInput.value.trim();
+    if (q) runSearch(q);
+    else renderResults([], "");
+  }
+});
+
 searchInput.addEventListener("input", () => {
   clearTimeout(searchTimer);
   const q = searchInput.value.trim();
@@ -1238,7 +1268,11 @@ function renderResults(results, query) {
   grid.innerHTML = "";
   if (results.length === 0) {
     if (query) grid.innerHTML =
-      `<div class="empty" style="grid-column:1/-1">No results for "${query}"</div>`;
+      `<div style="grid-column:1/-1;padding:40px 16px;text-align:center;color:#555">
+         <div style="font-size:32px;margin-bottom:12px">🔍</div>
+         <div style="font-size:14px">No matching photos for "<strong style="color:#8b949e">${query}</strong>"</div>
+         <div style="font-size:12px;margin-top:8px">Try a different description</div>
+       </div>`;
     return;
   }
   results.forEach(r => grid.appendChild(makeThumbnailItem(r)));
