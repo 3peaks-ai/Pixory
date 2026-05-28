@@ -825,40 +825,8 @@ async function textEmbed(query) {
   return Float32Array.from(vec, v => v / norm);
 }
 
-// ── Thumbnail resolution ─────────────────────────────────────────────────────────
-// Priority: 1) embedded in vectors.bin (works everywhere, offline)
-//           2) localhost serve.py (works when PC is on, home WiFi)
-
 const IS_LOCAL = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
 
-let _serveToken = '';
-
-async function loadServeToken() {
-  _serveToken = await getServeToken();
-}
-
-function getThumbUrl(result) {
-  // Priority 1: lazy decode from shard Blob (Idea 3 — minimal memory)
-  if (_shardBlob && _thumbOffsets[result.path]) {
-    const { offset, len } = _thumbOffsets[result.path];
-    if (len > 0) {
-      const slice = _shardBlob.slice(offset, offset + len);
-      return URL.createObjectURL(slice);  // caller must revoke
-    }
-  }
-  // Priority 2: embedded data URL (small archives without lazy)
-  if (result.thumbDataUrl) return result.thumbDataUrl;
-  // Priority 3: serve.py (home WiFi, token set)
-  if (_serveToken) {
-    const safe = result.path.replace(/[^a-zA-Z0-9._-]/g, '_').substring(0, 120);
-    return serveUrl('thumbs/' + safe + '.webp', _serveToken)
-        || serveUrl('thumbs/' + safe + '.jpg', _serveToken);
-  }
-  return null;
-}
-
-// Keep getThumbSrc as alias
-const getThumbSrc = getThumbUrl;
 
 // ── Cosine similarity (batch, optimised) ─────────────────────────────────────
 function cosineSimilarity(a, b) {
