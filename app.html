@@ -506,6 +506,12 @@ function serveUrl(relPath, token) {
   return `http://127.0.0.1:8765/${relPath}?token=${encodeURIComponent(token)}`;
 }
 
+let _serveToken = '';
+
+async function loadServeToken() {
+  _serveToken = await getServeToken();
+}
+
 
 // ── Lazy thumbnail loading (Idea 2+3: WebP + Blob lazy decode) ───────────────
 // Shard file stored as raw Blob in IDB.
