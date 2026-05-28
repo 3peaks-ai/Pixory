@@ -445,7 +445,7 @@ function askPassphrase(filename) {
 
 // ── IndexedDB ────────────────────────────────────────────────────────────────
 const DB_NAME    = "pixory3";
-const DB_VERSION = 1;
+const DB_VERSION = 3;
 const STORE      = "vectors";
 
 function openDB() {
@@ -463,7 +463,6 @@ function openDB() {
           db.createObjectStore('shard_blob');
         if (!db.objectStoreNames.contains('thumb_offsets'))
           db.createObjectStore('thumb_offsets');
-      }
     };
     req.onsuccess = e => resolve(e.target.result);
     req.onerror   = e => reject(e.target.error);
