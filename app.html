@@ -832,8 +832,8 @@ async function loadCLIP() {
       "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
     );
     [clipTokenizer, clipTextModel] = await Promise.all([
-      AutoTokenizer.from_pretrained("Xenova/clip-vit-base-patch32"),
-      CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-base-patch32"),
+      AutoTokenizer.from_pretrained("Xenova/clip-vit-large-patch14"),
+      CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-large-patch14"),
     ]);
     setLoading("AI model ready ✓");
   } catch (err) {
@@ -861,7 +861,7 @@ function cosineSimilarity(a, b) {
   return dot;
 }
 
-const SCORE_CUTOFF = 0.23;  // tunable: 0.20=permissive, 0.25=strict
+const SCORE_CUTOFF = 0.25;  // 0.25 = good balance for ViT-B/32
 
 function topK(queryVec, vectors, paths, dates, k = 20) {
   const scores = vectors
