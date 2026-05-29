@@ -861,7 +861,7 @@ function cosineSimilarity(a, b) {
   return dot;
 }
 
-const SCORE_CUTOFF = 0.25;  // 0.25 = good balance for ViT-B/32
+const SCORE_CUTOFF = 0.18;  // L/14 scores are lower (0.15-0.28 range)
 
 function topK(queryVec, vectors, paths, dates, k = 20) {
   const scores = vectors
@@ -1263,7 +1263,15 @@ async function runSearch(query) {
   try {
     const t0  = performance.now();
     const qv  = await textEmbed(query);
-    const top = topK(qv, cachedVecs, cachedPaths, cachedDates, 20);
+    // Debug: log top-5 raw scores to console
+  if (cachedVecs && cachedVecs.length > 0) {
+    const sample = cachedVecs.slice(0,5).map((v,i)=>({
+      s: cosineSimilarity(qv, v), p: cachedPaths[i]
+    })).sort((a,b)=>b.s-a.s);
+    console.log('[Pixory] Query dim:', qv.length, '| Vec dim:', cachedVecs[0].length,
+                '| Top scores:', sample.map(x=>x.s.toFixed(3)));
+  }
+  const top = topK(qv, cachedVecs, cachedPaths, cachedDates, 20);
     const ms  = Math.round(performance.now() - t0);
 
     // Debug: show top raw scores in console (remove after calibration)
