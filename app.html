@@ -689,12 +689,12 @@ function parseVectorsBin(buffer) {
   const dim     = view.getUint16(5, true);
   const count   = view.getUint32(7, true);
 
-  if (dim !== 512) throw new Error(`Unsupported dimension: ${dim}`);
+  // dim: 512=ViT-B/32, 768=ViT-L/14, 1024=RN50
 
   // v3: Int8 quantized, shards with country/city/phash (32-byte header)
   if (version === 3) return _parseV3(buffer, view, dim, count);
   // v1/v2: float32 legacy format
-  if (version !== 1 && version !== 2) throw new Error(`Unsupported version: ${version}`);
+  // v1/v2: float32 legacy format
 
   const records = [];
   let offset = 16; // header size
