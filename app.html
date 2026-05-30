@@ -236,7 +236,7 @@ body {
   <div class="spinner"></div>
   <div class="loading-text" id="loading-msg">Loading AI model…</div>
   <div id="load-detail" style="color:#555;font-size:11px;margin-top:4px">
-    First launch: ~110 MB download (cached forever after)</div>
+    First launch: ~38 MB (cached forever)</div>
 </div>
 
 <!-- Lightbox overlay -->
@@ -833,9 +833,37 @@ async function loadCLIP() {
       "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
     );
     [clipTokenizer, clipTextModel] = await Promise.all([
-      AutoTokenizer.from_pretrained("Xenova/clip-vit-large-patch14"),
-      CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-large-patch14", { quantized: true }),
-    ]);
+      // Model hosted on GitHub — 38 MB quantized, client-side only
+    // Queries NEVER sent to any server (privacy by design)
+    const MODEL_BASE = "https://3peaks-ai.github.io/Pixory/models/clip-l14-text/";
+    setLoading("Loading AI model (~38 MB, once)…");
+    try {
+      [clipTokenizer, clipTextModel] = await Promise.all([
+        AutoTokenizer.from_pretrained(MODEL_BASE),
+        CLIPTextModelWithProjection.from_pretrained(MODEL_BASE, {
+          quantized: true   // loads onnx/text_model_q8.onnx from GitHub
+        }),
+      ]);
+      setLoading("AI model ready ✓");
+    } catch (e) {
+      // Fallback: load directly from Xenova (HuggingFace)
+      console.warn("[Pixory] GitHub model failed, trying HuggingFace:", e.message);
+      setLoading("Loading AI model (fallback, ~440 MB)…");
+      [clipTokenizer, clipTextModel] = await Promise.all([
+        AutoTokenizer.from_pretrained("Xenova/clip-vit-large-patch14"),
+        CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-large-patch14"),
+      ]);
+      setLoading("AI model ready ✓");
+    }
+        return [tok, mdl];
+      } catch (_) {
+        setLoading("Loading AI (L/14 full, ~440 MB first time)…");
+        return await Promise.all([
+          AutoTokenizer.from_pretrained(L14),
+          CLIPTextModelWithProjection.from_pretrained(L14),
+        ]);
+      }
+    })())];
     setLoading("AI model ready ✓");
   } catch (err) {
     throw new Error("Model load failed: " + err.message);
