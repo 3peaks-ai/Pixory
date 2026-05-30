@@ -235,7 +235,8 @@ body {
 <div id="state-loading" class="active">
   <div class="spinner"></div>
   <div class="loading-text" id="loading-msg">Loading AI model…</div>
-  <div style="color:#555;font-size:11px">First launch: ~65MB download, cached forever</div>
+  <div id="load-detail" style="color:#555;font-size:11px;margin-top:4px">
+    First launch: ~110 MB download (cached forever after)</div>
 </div>
 
 <!-- Lightbox overlay -->
@@ -833,7 +834,7 @@ async function loadCLIP() {
     );
     [clipTokenizer, clipTextModel] = await Promise.all([
       AutoTokenizer.from_pretrained("Xenova/clip-vit-large-patch14"),
-      CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-large-patch14"),
+      CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-large-patch14", { quantized: true }),
     ]);
     setLoading("AI model ready ✓");
   } catch (err) {
