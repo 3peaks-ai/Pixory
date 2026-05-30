@@ -866,7 +866,7 @@ const SCORE_CUTOFF = 0.18;  // L/14 scores are lower (0.15-0.28 range)
 function topK(queryVec, vectors, paths, dates, k = 20) {
   const scores = vectors
     .map((v, i) => ({
-      score:        cosineSimilarity(queryVec, _dehubbify(v)),
+      score:        cosineSimilarity(queryVec, v),
       path:         paths[i],
       date:         dates[i],
       thumbDataUrl: cachedThumbs ? cachedThumbs[i] : "",
@@ -1295,15 +1295,15 @@ async function runSearch(query) {
   try {
     const t0  = performance.now();
     const qv  = await textEmbed(query);
-    // Apply hubness reduction + debug logging
-  qv = _dehubbify(qv);
+    // Apply hubness reduction
+  const qvD = _dehubbify(qv);
   if (cachedVecs && cachedVecs.length > 0) {
     const sample = cachedVecs.slice(0,5).map((v,i)=>({
-      s: cosineSimilarity(qv, _dehubbify(v)), p: cachedPaths[i]
+      s: cosineSimilarity(qvD, _dehubbify(v)), p: cachedPaths[i]
     })).sort((a,b)=>b.s-a.s);
-    console.log('[Pixory] dim:', qv.length, 'top scores:', sample.map(x=>x.s.toFixed(3)));
+    console.log('[Pixory] dim:', qvD.length, 'top scores:', sample.map(x=>x.s.toFixed(3)));
   }
-  const top = topK(qv, cachedVecs, cachedPaths, cachedDates, 12);
+  const top = topK(qvD, cachedVecs, cachedPaths, cachedDates, 12);
     const ms  = Math.round(performance.now() - t0);
 
     // Debug: show top raw scores in console (remove after calibration)
