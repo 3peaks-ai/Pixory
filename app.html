@@ -861,22 +861,21 @@ function cosineSimilarity(a, b) {
   return dot;
 }
 
-const SCORE_CUTOFF = 0.20;  // L/14 scores are lower (0.15-0.28 range)
+const SCORE_CUTOFF = 0.17;  // used for opacity only — results always show
 
 function topK(queryVec, vectors, paths, dates, k = 20) {
-  const scores = vectors
-    .map((v, i) => ({
-      score:        cosineSimilarity(queryVec, v),
-      path:         paths[i],
-      date:         dates[i],
-      thumbDataUrl: cachedThumbs ? cachedThumbs[i] : "",
-      cc:           cachedCC     ? cachedCC[i]      : 0,
-      i,
-    }))
-    .filter(r => r.score >= SCORE_CUTOFF &&
-                 (_activeCC === 0 || r.cc === _activeCC));
-  scores.sort((a, b) => b.score - a.score);
-  return scores.slice(0, k);
+  if (!vectors || vectors.length === 0) return [];
+
+  const scored = vectors.map((v, i) => ({
+    score: cosineSimilarity(queryVec, v),
+    path:  paths[i],
+    date:  dates ? dates[i] : "",
+    idx:   i,
+  })).sort((a, b) => b.score - a.score);
+
+  // Always return top results — no hard cutoff that hides everything.
+  // Results below SCORE_CUTOFF shown with reduced opacity (handled in render).
+  return scored.slice(0, k);
 }
 
 // ── State management ──────────────────────────────────────────────────────────
@@ -1225,6 +1224,9 @@ function renderBrowseBatch() {
 // ── Shared thumbnail item factory ─────────────────────────────────────────────
 function makeThumbnailItem(r) {
   const item = document.createElement('div');
+  const confidence = r.score >= SCORE_CUTOFF ? 1.0 :
+                     r.score >= SCORE_CUTOFF - 0.05 ? 0.75 : 0.5;
+  item.style.opacity = confidence;
   item.className = 'result-item';
   const name = r.path.split(/[/\\]/).pop();
   const url  = getThumbUrl(r);
@@ -1317,13 +1319,19 @@ async function runSearch(query) {
   const qvH = _dehubbify(qv);
   const vecs = _dehubbed || cachedVecs;
 
-  // Debug
+  // Diagnostics — open browser console to see
   if (vecs && vecs.length > 0) {
-    const sample = [...vecs].slice(0,5).map((v,i)=>({
-      s: cosineSimilarity(qvH, v), p: cachedPaths[i]
-    })).sort((a,b)=>b.s-a.s);
-    console.log('[Pixory] dim:', qvH.length, 'dehubbify:', !!_dehubbed,
-      'top scores:', sample.map(x=>x.s.toFixed(3)));
+    const allS = vecs.map(v => cosineSimilarity(qvH, v)).sort((a,b)=>b-a);
+    console.log('[Pixory]',
+      'q_dim:', qvH.length, 'v_dim:', vecs[0].length,
+      'n_vecs:', vecs.length, 'dehubbify:', !!_dehubbed,
+      'top5:', allS.slice(0,5).map(s=>s.toFixed(3)),
+      'above_cutoff:', allS.filter(s=>s>=SCORE_CUTOFF).length
+    );
+    if (qvH.length !== vecs[0].length)
+      console.error('[Pixory] DIMENSION MISMATCH', qvH.length, 'vs', vecs[0].length);
+    if (allS[0] < 0.10)
+      console.warn('[Pixory] max score only', allS[0].toFixed(3), '- possible model mismatch');
   }
   const top = topK(qvH, vecs, cachedPaths, cachedDates, 12);
     const ms  = Math.round(performance.now() - t0);
@@ -1346,10 +1354,20 @@ async function runSearch(query) {
 function renderResults(results, query) {
   grid.innerHTML = "";
   if (results.length === 0) {
-    if (query) grid.innerHTML =
-      `<div style="grid-column:1/-1;padding:40px 16px;text-align:center;color:#555">
-         <div style="font-size:32px;margin-bottom:12px">🔍</div>
-         <div style="font-size:14px">No matching photos for "<strong style="color:#8b949e">${query}</strong>"</div>
+    const nv = (cachedVecs||[]).length;
+    const dim = nv > 0 ? (cachedVecs[0]||[]).length : 0;
+    if (query && nv === 0) {
+      grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#98989D">
+        No photos indexed.<br><br>Run <b>/sync</b> in Telegram to import your index.</div>`;
+    } else if (query) {
+      // Compute max score for debugging
+      const vecs = _dehubbed || cachedVecs || [];
+      const qvH = _meanVec ? _dehubbify(query._rawVec || new Float32Array(dim)) : new Float32Array(dim);
+      grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#98989D">
+        No results found for "<b>${query}</b>"<br>
+        <span style="font-size:12px;color:#636366">${nv} photos indexed (${dim}-dim) · Open DevTools console for score details</span></div>`;
+    }
+  }</strong>"</div>
          <div style="font-size:12px;margin-top:8px">Try a different description</div>
        </div>`;
     return;
