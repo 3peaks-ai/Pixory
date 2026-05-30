@@ -861,7 +861,7 @@ function cosineSimilarity(a, b) {
   return dot;
 }
 
-const SCORE_CUTOFF = 0.18;  // L/14 scores are lower (0.15-0.28 range)
+const SCORE_CUTOFF = 0.20;  // L/14 scores are lower (0.15-0.28 range)
 
 function topK(queryVec, vectors, paths, dates, k = 20) {
   const scores = vectors
@@ -947,39 +947,57 @@ async function loadVectorsFromDB() {
   cachedDates    = rows.map(r => r.date || "");
   cachedThumbs   = rows.map(r => r.thumbDataUrl || "");
   cachedCC       = rows.map(r => r.cc || 0);
-  // Compute mean vector for hubness reduction
-  _computeMeanVec();
+  // Preprocess: dehubbify all stored vectors once at load time
+  _preprocessVecs();
 }
 
-let _meanVec = null;
+// ── Hubness reduction ─────────────────────────────────────────────────────────
+// Hub photos (e.g. closet door) have vectors near the mean of the space
+// and incorrectly appear relevant to every query.
+// Fix: project out the mean direction from ALL vectors (stored + query).
+// Applied once to stored vectors at load time, applied to each query at search time.
 
-function _computeMeanVec() {
-  if (!cachedVecs || cachedVecs.length === 0) { _meanVec = null; return; }
-  const dim = cachedVecs[0].length;
-  const mean = new Float32Array(dim);
-  for (const v of cachedVecs) for (let i = 0; i < dim; i++) mean[i] += v[i];
-  const n = cachedVecs.length;
-  for (let i = 0; i < dim; i++) mean[i] /= n;
-  // Normalize mean vector
-  let norm = 0; for (let i = 0; i < dim; i++) norm += mean[i]*mean[i];
-  norm = Math.sqrt(norm);
-  if (norm > 0) for (let i = 0; i < dim; i++) mean[i] /= norm;
-  _meanVec = mean;
-}
+let _meanVec  = null;  // unit vector = mean direction
+let _dehubbed = null;  // dehubbified version of cachedVecs
 
 function _dehubbify(vec) {
-  // Subtract mean component to reduce hubness effect
-  // Photos near the "center" of the embedding space stop dominating results
   if (!_meanVec) return vec;
-  const dim = vec.length;
-  const dot = vec.reduce((s, v, i) => s + v * _meanVec[i], 0);
-  const out = new Float32Array(dim);
+  // v' = v - (v·mean)·mean  →  projects out the "generic" direction
+  let dot = 0;
+  for (let i = 0; i < vec.length; i++) dot += vec[i] * _meanVec[i];
+  const out = new Float32Array(vec.length);
   let norm2 = 0;
-  for (let i = 0; i < dim; i++) { out[i] = vec[i] - dot * _meanVec[i]; norm2 += out[i]*out[i]; }
+  for (let i = 0; i < vec.length; i++) {
+    out[i] = vec[i] - dot * _meanVec[i];
+    norm2 += out[i] * out[i];
+  }
   const norm = Math.sqrt(norm2);
-  if (norm > 0) for (let i = 0; i < dim; i++) out[i] /= norm;
+  if (norm > 1e-8) for (let i = 0; i < vec.length; i++) out[i] /= norm;
   return out;
 }
+
+function _preprocessVecs() {
+  if (!cachedVecs || cachedVecs.length === 0) return;
+  const dim = cachedVecs[0].length;
+
+  // 1. Compute mean vector of all stored embeddings
+  const mean = new Float32Array(dim);
+  for (const v of cachedVecs) for (let i = 0; i < dim; i++) mean[i] += v[i];
+  for (let i = 0; i < dim; i++) mean[i] /= cachedVecs.length;
+  // Normalize to unit vector
+  let norm = 0;
+  for (let i = 0; i < dim; i++) norm += mean[i] * mean[i];
+  norm = Math.sqrt(norm);
+  if (norm < 1e-8) { _meanVec = null; _dehubbed = null; return; }
+  _meanVec = mean.map(v => v / norm);
+
+  // 2. Dehubbify all stored vectors (done once in memory, not on disk)
+  _dehubbed = cachedVecs.map(v => _dehubbify(v));
+  console.log('[Pixory] Hubness reduction applied to', _dehubbed.length, 'vectors');
+}
+
+
+
 
 
 // ── File import ───────────────────────────────────────────────────────────────
@@ -1295,15 +1313,19 @@ async function runSearch(query) {
   try {
     const t0  = performance.now();
     const qv  = await textEmbed(query);
-    // Apply hubness reduction
-  const qvD = _dehubbify(qv);
-  if (cachedVecs && cachedVecs.length > 0) {
-    const sample = cachedVecs.slice(0,5).map((v,i)=>({
-      s: cosineSimilarity(qvD, _dehubbify(v)), p: cachedPaths[i]
+    // Apply same dehubbify to query as was applied to stored vectors
+  const qvH = _dehubbify(qv);
+  const vecs = _dehubbed || cachedVecs;
+
+  // Debug
+  if (vecs && vecs.length > 0) {
+    const sample = [...vecs].slice(0,5).map((v,i)=>({
+      s: cosineSimilarity(qvH, v), p: cachedPaths[i]
     })).sort((a,b)=>b.s-a.s);
-    console.log('[Pixory] dim:', qvD.length, 'top scores:', sample.map(x=>x.s.toFixed(3)));
+    console.log('[Pixory] dim:', qvH.length, 'dehubbify:', !!_dehubbed,
+      'top scores:', sample.map(x=>x.s.toFixed(3)));
   }
-  const top = topK(qvD, cachedVecs, cachedPaths, cachedDates, 12);
+  const top = topK(qvH, vecs, cachedPaths, cachedDates, 12);
     const ms  = Math.round(performance.now() - t0);
 
     // Debug: show top raw scores in console (remove after calibration)
