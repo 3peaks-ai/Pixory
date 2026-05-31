@@ -819,97 +819,151 @@ function _parseV3(buffer, view, dim, count) {
 }
 
 async function loadCLIP() {
-  // Note: WKWebView (Telegram/iOS) can freeze DOM during WASM compilation.
-  // We show a static message with clear expectation rather than a timer
-  // that may appear frozen.
-  setLoading(
-    "Loading AI model…\n\n" +
-    "⏳ First launch takes 30–90 seconds.\n" +
-    "Screen may look frozen — this is normal.\n" +
-    "Subsequent launches are instant (cached)."
-  );
+  // ── Chunked download + IndexedDB cache ─────────────────────────────────────
+  // iOS WKWebView can't fetch() 120MB into a single ArrayBuffer.
+  // Solution: download in 10MB chunks, cache in IndexedDB, assemble locally.
+  // Privacy: model runs entirely on device, queries never leave. ✅
 
-  try {
-    const { AutoTokenizer, CLIPTextModelWithProjection, env } = await import(
-      "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
-    );
+  const MODEL_BASE   = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
+  const MODEL_FILE   = "onnx/text_model_quantized.onnx";
+  const IDB_KEY      = "pixory-clip-l14-v1";
+  const CHUNK_SIZE   = 10 * 1024 * 1024;  // 10 MB
 
-    // Fix silent hang in Telegram WebView:
-    // Transformers.js needs ONNX Runtime WASM files.
-    // Without explicit paths it looks next to app.html (GitHub Pages) → 404 → hangs.
-    // Point explicitly to jsDelivr CDN where the WASM files actually exist.
-    env.backends.onnx.wasm.wasmPaths =
-      "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+  // ── Step 1: check IndexedDB cache ─────────────────────────────────────────
+  async function idbGet(key) {
+    return new Promise((res, rej) => {
+      const req = indexedDB.open("pixory-model-cache", 1);
+      req.onupgradeneeded = e => e.target.result.createObjectStore("models");
+      req.onsuccess = e => {
+        const tx = e.target.result.transaction("models", "readonly");
+        const r2 = tx.objectStore("models").get(key);
+        r2.onsuccess = () => res(r2.result || null);
+        r2.onerror   = () => res(null);
+      };
+      req.onerror = () => res(null);
+    });
+  }
 
-    // Disable local model cache check (can cause issues in Telegram WebView)
-    env.allowLocalModels = false;
+  async function idbPut(key, value) {
+    return new Promise((res, rej) => {
+      const req = indexedDB.open("pixory-model-cache", 1);
+      req.onupgradeneeded = e => e.target.result.createObjectStore("models");
+      req.onsuccess = e => {
+        const tx = e.target.result.transaction("models", "readwrite");
+        tx.objectStore("models").put(value, key);
+        tx.oncomplete = () => res();
+        tx.onerror    = () => rej(tx.error);
+      };
+    });
+  }
 
-    console.log("[Pixory] Transformers.js env configured, loading model...");
-    // L/14 text encoder — client-side only, queries never leave device
-    // Use HuggingFace repo ID — Transformers.js adds the base URL automatically
-    // Model hosted on Cloudflare R2 — same CDN as Worker, reliable in Telegram
-    // 🔴 SECURITY: model + photos + worker on same CF account — see Sprint 4 P0
-    const MODEL_BASE = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
-    const MODEL_ID   = MODEL_BASE;  // Transformers.js accepts full URL as model ID
-    const testFiles = ["config.json", "tokenizer.json",
-                       "onnx/text_model_quantized.onnx"];
+  // ── Step 2: load or download model ────────────────────────────────────────
+  let modelBuffer = await idbGet(IDB_KEY);
 
-    for (const fname of testFiles) {
-      try {
-        setLoading(`Testing: ${fname}…`);
-        const r = await fetch(MODEL_BASE + fname, { method: "HEAD" });
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const size = r.headers.get("content-length");
-        console.log("[Pixory] ✅", fname, size ? (size/1e6).toFixed(1)+"MB" : "");
-      } catch (err) {
-        setLoading(`❌ Failed: ${fname}\n${err.message}`);
-        document.getElementById("load-detail").textContent =
-          "This file cannot be fetched from HuggingFace in Telegram. " +
-          "Solution: host model on Cloudflare R2.";
-        throw err;
-      }
+  if (modelBuffer) {
+    setLoading("Loading AI model from cache…");
+    console.log("[Pixory] Model loaded from IndexedDB ✅", modelBuffer.byteLength);
+  } else {
+    // Get file size first
+    setLoading("Checking model size…");
+    const head = await fetch(MODEL_BASE + MODEL_FILE, { method: "HEAD" });
+    const totalSize = parseInt(head.headers.get("content-length") || "0");
+    const totalMB   = (totalSize / 1e6).toFixed(0);
+    console.log("[Pixory] Downloading model:", totalMB, "MB in chunks");
+
+    // Download in CHUNK_SIZE pieces — each chunk is GC'd after storing
+    const chunks = [];
+    let downloaded = 0;
+
+    while (downloaded < totalSize) {
+      const end  = Math.min(downloaded + CHUNK_SIZE - 1, totalSize - 1);
+      const resp = await fetch(MODEL_BASE + MODEL_FILE, {
+        headers: { "Range": `bytes=${downloaded}-${end}` }
+      });
+      if (!resp.ok && resp.status !== 206)
+        throw new Error(`Chunk fetch failed: HTTP ${resp.status}`);
+
+      const chunk = await resp.arrayBuffer();
+      chunks.push(new Uint8Array(chunk));
+      downloaded += chunk.byteLength;
+
+      const pct = Math.round(downloaded / totalSize * 100);
+      setLoading(`Downloading AI model: ${pct}% (${(downloaded/1e6).toFixed(0)}/${totalMB} MB)`);
     }
 
-    setLoading("Loading AI model (~120 MB, first time only)…");
-    [clipTokenizer, clipTextModel] = await Promise.all([
-      AutoTokenizer.from_pretrained(MODEL_BASE),
-      CLIPTextModelWithProjection.from_pretrained(MODEL_BASE, { quantized: true }),
-    ]);
-    setLoading("AI model ready ✓");
-  } catch (e) {
-    console.error("[Pixory] Model load failed:", e);
-    const msg = e?.message || String(e);
+    // Assemble chunks into single buffer and cache in IndexedDB
+    setLoading("Saving model to device cache…");
+    const total  = chunks.reduce((s, c) => s + c.length, 0);
+    const merged = new Uint8Array(total);
+    let pos = 0;
+    for (const c of chunks) { merged.set(c, pos); pos += c.length; }
+    modelBuffer = merged.buffer;
 
-    // Keep loading screen visible — don't proceed without the model
-    const loadScr = document.getElementById("loading-screen");
-    if (loadScr) loadScr.style.display = "flex";
-
-    document.getElementById("loading-msg").innerHTML =
-      `<div style="color:#FF453A;font-size:16px;margin-bottom:12px">❌ Model failed to load</div>
-       <div style="color:#FF453A;font-size:12px;margin-bottom:16px">${msg.slice(0,120)}</div>
-       <button onclick="location.reload()" style="background:#0A84FF;color:white;border:none;
-         border-radius:12px;padding:12px 24px;font-size:15px;cursor:pointer">
-         Retry
-       </button>`;
-
-    const sub = document.getElementById("load-detail");
-    if (sub) sub.textContent = "Tap Retry to try again. Make sure you have internet connection.";
-
-    throw e; // stop init() from continuing without model
+    await idbPut(IDB_KEY, modelBuffer);
+    console.log("[Pixory] Model cached in IndexedDB ✅");
   }
+
+  // ── Step 3: create ONNX session from buffer ────────────────────────────────
+  setLoading("Initialising AI model…");
+  const { AutoTokenizer } = await import(
+    "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
+  );
+
+  // Configure ONNX Runtime WASM paths
+  const { env } = await import(
+    "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
+  );
+  env.backends.onnx.wasm.wasmPaths =
+    "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+  env.allowLocalModels = false;
+
+  // Load tokenizer only (small — 2MB, no issue)
+  const tokenizer = await AutoTokenizer.from_pretrained(
+    "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/"
+  );
+
+  // Create ONNX session from our cached buffer
+  const ort = (await import(
+    "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"
+  )).default || (await import(
+    "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"
+  ));
+
+  ort.env.wasm.wasmPaths =
+    "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+
+  const session = await ort.InferenceSession.create(modelBuffer, {
+    executionProviders: ["wasm"],
+  });
+
+  console.log("[Pixory] ONNX session ready ✅");
+  setLoading("AI model ready ✓");
+
+  // ── Step 4: expose encode function ────────────────────────────────────────
+  window._encodeText = async (query) => {
+    const inputs = tokenizer([query], { padding: true, truncation: true, max_length: 77 });
+    const ids  = inputs.input_ids.data;
+    const mask = inputs.attention_mask.data;
+    const n    = ids.length;
+
+    const feeds = {
+      input_ids:      new ort.Tensor("int64", BigInt64Array.from(ids,  BigInt), [1, n]),
+      attention_mask: new ort.Tensor("int64", BigInt64Array.from(mask, BigInt), [1, n]),
+    };
+    const out = await session.run(feeds);
+    const vec = Object.values(out).at(-1).data;  // last output = text embeds
+    const arr = new Float32Array(vec);
+    let norm = 0;
+    for (let i = 0; i < arr.length; i++) norm += arr[i]*arr[i];
+    norm = Math.sqrt(norm);
+    for (let i = 0; i < arr.length; i++) arr[i] /= norm;
+    return arr;
+  };
 }
 
 async function textEmbed(query) {
-  if (!clipTokenizer || !clipTextModel) {
-    console.error("[Pixory] Model not loaded! clipTokenizer:", !!clipTokenizer, "clipTextModel:", !!clipTextModel);
-    throw new Error("AI model not loaded. Check loading screen for errors.");
-  }
-  const inputs = clipTokenizer([query], { padding: true, truncation: true });
-  const { text_embeds } = await clipTextModel(inputs);
-  // L2-normalize to match open_clip image embeddings
-  const vec  = text_embeds.data;
-  const norm = Math.sqrt(Array.from(vec).reduce((s, v) => s + v * v, 0));
-  return Float32Array.from(vec, v => v / norm);
+  if (window._encodeText) return await window._encodeText(query);
+  throw new Error("AI encoder not initialized");
 }
 
 const IS_LOCAL = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
