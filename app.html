@@ -849,15 +849,25 @@ async function loadCLIP() {
     // Use HuggingFace repo ID — Transformers.js adds the base URL automatically
     const MODEL_ID = "3Peaks-AI/pixory-clip-text";
 
-    // Connectivity test
-    try {
-      const testResp = await fetch(
-        "https://huggingface.co/" + MODEL_ID + "/resolve/main/config.json");
-      if (!testResp.ok) throw new Error("HTTP " + testResp.status);
-      console.log("[Pixory] HuggingFace reachable ✅");
-    } catch (connErr) {
-      setLoading("❌ Cannot reach model: " + connErr.message);
-      return;
+    // Step-by-step diagnostic: test each file individually
+    const MODEL_BASE = "https://huggingface.co/" + MODEL_ID + "/resolve/main/";
+    const testFiles = ["config.json", "tokenizer.json",
+                       "onnx/text_model_quantized.onnx"];
+
+    for (const fname of testFiles) {
+      try {
+        setLoading(`Testing: ${fname}…`);
+        const r = await fetch(MODEL_BASE + fname, { method: "HEAD" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const size = r.headers.get("content-length");
+        console.log("[Pixory] ✅", fname, size ? (size/1e6).toFixed(1)+"MB" : "");
+      } catch (err) {
+        setLoading(`❌ Failed: ${fname}\n${err.message}`);
+        document.getElementById("load-detail").textContent =
+          "This file cannot be fetched from HuggingFace in Telegram. " +
+          "Solution: host model on Cloudflare R2.";
+        throw err;
+      }
     }
 
     setLoading("Loading AI model (~120 MB, first time only)…");
