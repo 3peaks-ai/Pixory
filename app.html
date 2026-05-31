@@ -833,36 +833,25 @@ async function loadCLIP() {
       "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
     );
     [clipTokenizer, clipTextModel] = await Promise.all([
-      // Model hosted on GitHub — ~120 MB quantized, client-side only
-    // Queries NEVER sent to any server (privacy by design)
-    const MODEL_BASE = "https://huggingface.co/3Peaks-AI/pixory-clip-text/resolve/main/";
-    setLoading("Loading AI model (~38 MB, once)…");
+      // L/14 text encoder from HuggingFace (one-time ~120 MB download)
+    // Queries NEVER sent to server — all inference is client-side
+    const MODEL_URL = "https://huggingface.co/3Peaks-AI/pixory-clip-text/resolve/main/";
+    setLoading("Loading AI model (~120 MB, first time only)…");
     try {
+      // quantized:false → looks for onnx/text_model.onnx
+      // quantized:true  → looks for onnx/text_model_quantized.onnx
       [clipTokenizer, clipTextModel] = await Promise.all([
-        AutoTokenizer.from_pretrained(MODEL_BASE),
-        CLIPTextModelWithProjection.from_pretrained(MODEL_BASE, {
-          quantized: true   // loads onnx/text_model_q8.onnx from GitHub
-        }),
+        AutoTokenizer.from_pretrained(MODEL_URL),
+        CLIPTextModelWithProjection.from_pretrained(MODEL_URL, { quantized: true }),
       ]);
       setLoading("AI model ready ✓");
     } catch (e) {
-      // Fallback: load directly from Xenova (HuggingFace)
-      console.warn("[Pixory] GitHub model failed, trying HuggingFace:", e.message);
-      setLoading("Loading AI model (fallback, ~440 MB)…");
-      [clipTokenizer, clipTextModel] = await Promise.all([
-        AutoTokenizer.from_pretrained("Xenova/clip-vit-large-patch14"),
-        CLIPTextModelWithProjection.from_pretrained("Xenova/clip-vit-large-patch14"),
-      ]);
-      setLoading("AI model ready ✓");
-    }
-        return [tok, mdl];
-      } catch (_) {
-        setLoading("Loading AI (L/14 full, ~440 MB first time)…");
-        return await Promise.all([
-          AutoTokenizer.from_pretrained(L14),
-          CLIPTextModelWithProjection.from_pretrained(L14),
-        ]);
-      }
+      console.error("[Pixory] Model load failed:", e);
+      // Show error visibly in the app
+      const loadEl = document.getElementById("loading-msg");
+      if (loadEl) loadEl.style.color = "#FF453A";
+      setLoading("Model load failed: " + e.message.slice(0,80));
+      throw e;
     })())];
     setLoading("AI model ready ✓");
   } catch (err) {
