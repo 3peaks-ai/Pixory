@@ -3,50 +3,46 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fetch Test</title>
+<title>CDN + Fetch Test</title>
 <style>
-body { background:#111; color:#fff; font-family:monospace;
-       padding:16px; margin:0; font-size:13px; }
-button { background:#0A84FF; color:#fff; border:none; border-radius:10px;
-         padding:12px 24px; font-size:15px; width:100%; margin:8px 0; }
-.ok  { color:#30D158; }
-.err { color:#FF453A; }
-.inf { color:#8E8E93; }
+body{background:#111;color:#fff;font-family:monospace;padding:16px;font-size:13px}
+button{background:#0A84FF;color:#fff;border:none;border-radius:10px;
+       padding:12px 24px;font-size:15px;width:100%;margin:6px 0}
+.ok{color:#30D158}.err{color:#FF453A}.inf{color:#8E8E93}
 </style>
 </head>
 <body>
-<button onclick="runTest()">▶ Start Test</button>
+<button onclick="runTest()">▶ Run All Tests</button>
 <div id="log"></div>
 <script>
-const BASE = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
-const log  = document.getElementById("log");
+const R2  = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
+const CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+const log = document.getElementById("log");
+function add(msg,cls){const d=document.createElement("div");d.className=cls||"";d.textContent=msg;log.appendChild(d);}
 
-function add(msg, cls) {
-  const d = document.createElement("div");
-  d.className = cls||""; d.textContent = msg;
-  log.appendChild(d);
-}
-
-async function testFile(name) {
-  add("→ " + name, "inf");
+async function testFetch(label, url) {
+  add("→ " + label, "inf");
   try {
-    const r = await fetch(BASE + name);
+    const r = await fetch(url);
     if (!r.ok) { add("  ❌ HTTP " + r.status, "err"); return false; }
     const buf = await r.arrayBuffer();
-    add("  ✅ " + (buf.byteLength/1e6).toFixed(1) + " MB OK", "ok");
+    add("  ✅ " + (buf.byteLength/1024).toFixed(0) + " KB", "ok");
     return true;
-  } catch(e) {
-    add("  ❌ " + e.message, "err"); return false;
-  }
+  } catch(e) { add("  ❌ " + e.message, "err"); return false; }
 }
 
 async function runTest() {
   log.innerHTML = "";
-  for (const mb of [70, 100, 120]) {
-    const ok = await testFile("test_" + mb + "mb.bin");
-    if (!ok) { add("⛔ Limit below " + mb + "MB", "err"); return; }
-  }
-  add("🎉 All passed!", "ok");
+  add("=== jsDelivr CDN ===","inf");
+  await testFetch("ort.min.js", CDN + "ort.min.js");
+  await testFetch("ort-wasm-simd.wasm", CDN + "ort-wasm-simd.wasm");
+
+  add("=== Cloudflare R2 ===","inf");
+  await testFetch("config.json", R2 + "config.json");
+  await testFetch("tokenizer.json", R2 + "tokenizer.json");
+  await testFetch("ort.min.js from R2", R2 + "ort.min.js");
+
+  add("=== DONE ===","inf");
 }
 </script>
 </body>
