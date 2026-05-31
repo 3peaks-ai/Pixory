@@ -1403,10 +1403,6 @@ function renderResults(results, query) {
         No results found for "<b>${query}</b>"<br>
         <span style="font-size:12px;color:#636366">${nv} photos indexed (${dim}-dim) · Open DevTools console for score details</span></div>`;
     }
-  }</strong>"</div>
-         <div style="font-size:12px;margin-top:8px">Try a different description</div>
-       </div>`;
-    return;
   }
   results.forEach(r => grid.appendChild(makeThumbnailItem(r)));
 }
