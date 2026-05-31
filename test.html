@@ -23,41 +23,30 @@ const log  = document.getElementById("log");
 
 function add(msg, cls) {
   const d = document.createElement("div");
-  d.className = cls || "";
-  d.textContent = msg;
+  d.className = cls||""; d.textContent = msg;
   log.appendChild(d);
 }
 
-async function testFile(name, expectedMB) {
-  add("→ testing: " + name, "inf");
+async function testFile(name) {
+  add("→ " + name, "inf");
   try {
     const r = await fetch(BASE + name);
-    add("  HTTP status: " + r.status, r.ok ? "ok" : "err");
-    if (!r.ok) { add("  ❌ " + (expectedMB||"?") + "MB FAIL: HTTP " + r.status, "err"); return false; }
+    if (!r.ok) { add("  ❌ HTTP " + r.status, "err"); return false; }
     const buf = await r.arrayBuffer();
-    add("  ✅ " + (buf.byteLength/1e6).toFixed(1) + " MB received OK", "ok");
+    add("  ✅ " + (buf.byteLength/1e6).toFixed(1) + " MB OK", "ok");
     return true;
   } catch(e) {
-    add("  ❌ FAIL: " + e.message, "err");
-    return false;
+    add("  ❌ " + e.message, "err"); return false;
   }
 }
 
 async function runTest() {
   log.innerHTML = "";
-  // First: test known-working small files
-  add("=== KNOWN FILES ===", "inf");
-  await testFile("config.json");
-  await testFile("tokenizer.json");
-  
-  // Then: test sizes
-  add("=== SIZE TEST ===", "inf");
-  add("(upload test files first: py make_test_files.py)", "inf");
-  for (const mb of [10, 30, 50, 70]) {
-    const ok = await testFile("test_" + mb + "mb.bin", mb);
-    if (!ok) { add("⛔ Limit below " + mb + "MB", "err"); break; }
+  for (const mb of [70, 100, 120]) {
+    const ok = await testFile("test_" + mb + "mb.bin");
+    if (!ok) { add("⛔ Limit below " + mb + "MB", "err"); return; }
   }
-  add("=== DONE ===", "inf");
+  add("🎉 All passed!", "ok");
 }
 </script>
 </body>
