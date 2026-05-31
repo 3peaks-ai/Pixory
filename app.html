@@ -3,7 +3,6 @@
 <head>
   <!-- Load AI libraries statically — dynamic import() crashes Telegram WebView -->
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"></script>
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' https://huggingface.co https://cdn.jsdelivr.net https://telegram.org https://*.workers.dev; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; worker-src blob:; object-src 'none'; base-uri 'self';">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
@@ -848,6 +847,87 @@ function _parseV3(buffer, view, dim, count) {
   return records;
 }
 
+// ── Minimal CLIP BPE Tokenizer (pure JS, no dependencies) ─────────────────
+class CLIPTokenizer {
+  constructor(vocab, merges) {
+    this.vocab = vocab;
+    this.merges = {};
+    merges.forEach((m, i) => { this.merges[m] = i; });
+    this._b2u = this._buildB2U();
+    this._cache = {};
+  }
+  _buildB2U() {
+    const bs = [], cs = [];
+    const push = (b) => { bs.push(b); cs.push(b); };
+    for (let b=33; b<=126; b++) push(b);
+    for (let b=161; b<=172; b++) push(b);
+    for (let b=174; b<=255; b++) push(b);
+    let n=0;
+    for (let b=0; b<256; b++) {
+      if (!bs.includes(b)) { bs.push(b); cs.push(256+n); n++; }
+    }
+    const m = {};
+    bs.forEach((b,i) => { m[b] = String.fromCodePoint(cs[i]); });
+    return m;
+  }
+  _pairs(w) {
+    const s = new Set();
+    for (let i=0; i<w.length-1; i++) s.add(w[i]+'\x00'+w[i+1]);
+    return s;
+  }
+  _bpe(token) {
+    if (this._cache[token]) return this._cache[token];
+    let w = token.split('').map(c => {
+      let out='';
+      for (const byte of new TextEncoder().encode(c))
+        out += this._b2u[byte] || String.fromCodePoint(byte);
+      return out;
+    });
+    let pairs = this._pairs(w);
+    while (pairs.size) {
+      let best=null, bestR=Infinity;
+      for (const p of pairs) {
+        const r = this.merges[p.replace('\x00',' ')];
+        if (r!==undefined && r<bestR) { bestR=r; best=p; }
+      }
+      if (!best) break;
+      const [a,b] = best.split('\x00');
+      const nw=[];
+      let i=0;
+      while (i<w.length) {
+        const j = w.indexOf(a, i);
+        if (j===-1) { nw.push(...w.slice(i)); break; }
+        nw.push(...w.slice(i,j));
+        if (j<w.length-1 && w[j+1]===b) { nw.push(a+b); i=j+2; }
+        else { nw.push(a); i=j+1; }
+      }
+      w=nw;
+      if (w.length===1) break;
+      pairs=this._pairs(w);
+    }
+    const r=w.join(' ');
+    this._cache[token]=r;
+    return r;
+  }
+  tokenize(text, maxLen=77) {
+    text = text.toLowerCase().replace(/\s+/g,' ').trim();
+    const SOT = this.vocab['<|startoftext|>'];
+    const EOT = this.vocab['<|endoftext|>'];
+    const ids=[SOT];
+    const words = text.match(/[\w']+|[^\w\s]/g) || [];
+    for (const word of words) {
+      const bpe = this._bpe(word+'</w>').split(' ');
+      for (const t of bpe) { if (this.vocab[t]!==undefined) ids.push(this.vocab[t]); }
+    }
+    ids.push(EOT);
+    const inputIds = new Array(maxLen).fill(0);
+    const attMask  = new Array(maxLen).fill(0);
+    const n = Math.min(ids.length, maxLen);
+    for (let i=0;i<n;i++) { inputIds[i]=ids[i]; attMask[i]=1; }
+    return { inputIds, attMask };
+  }
+}
+
 async function loadCLIP() {
   const dbg  = document.getElementById("tg-debug");
   const step = (msg) => {
@@ -856,111 +936,89 @@ async function loadCLIP() {
     setLoading(msg);
   };
 
-  // Verify libraries loaded (static scripts in <head>)
-  step("Checking libraries…");
-  if (typeof ort === "undefined")
-    throw new Error("ort not loaded — check CDN");
-  if (typeof transformers_pipeline === "undefined" && typeof AutoTokenizer === "undefined"
-      && !(window.transformers || window.Transformers))
-    throw new Error("Transformers.js not loaded — check CDN");
-
-  const Tf = window.transformers || window.Transformers || {};
-  const AutoTok = Tf.AutoTokenizer || window.AutoTokenizer;
-  if (!AutoTok) throw new Error("AutoTokenizer not found");
+  step("Checking ORT…");
+  if (typeof ort === "undefined") throw new Error("ort.min.js not loaded");
 
   const MODEL_BASE = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
-  const MODEL_FILE = "onnx/text_model_quantized.onnx";
   const IDB_KEY    = "pixory-clip-l14-v1";
+  const CHUNK      = 10 * 1024 * 1024;
 
   // ── IDB cache ─────────────────────────────────────────────────────────────
   step("Opening cache…");
   let modelBuffer = null;
   try {
-    modelBuffer = await new Promise((res) => {
+    modelBuffer = await new Promise(res => {
       const req = indexedDB.open("pixory-model", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("m");
       req.onsuccess = e => {
         const r = e.target.result.transaction("m","readonly")
                    .objectStore("m").get(IDB_KEY);
-        r.onsuccess = () => res(r.result || null);
+        r.onsuccess = () => res(r.result||null);
         r.onerror   = () => res(null);
       };
       req.onerror = () => res(null);
     });
-    if (modelBuffer) step("Cache hit " + (modelBuffer.byteLength/1e6).toFixed(0) + " MB");
-  } catch(e) { step("No cache — downloading…"); }
+    if (modelBuffer) step("Cached ✅ " + (modelBuffer.byteLength/1e6|0) + " MB");
+  } catch(e) { step("No cache, downloading…"); }
 
   // ── Chunked download ───────────────────────────────────────────────────────
   if (!modelBuffer) {
-    step("Checking model size…");
-    const head  = await fetch(MODEL_BASE + MODEL_FILE, { method:"HEAD" });
-    const total = parseInt(head.headers.get("content-length") || "0");
-    const CHUNK = 10 * 1024 * 1024;
-    const chunks = []; let done = 0;
-
-    while (done < total) {
-      const end  = Math.min(done + CHUNK - 1, total - 1);
-      const resp = await fetch(MODEL_BASE + MODEL_FILE,
-                               { headers:{ Range:`bytes=${done}-${end}` } });
-      if (!resp.ok && resp.status !== 206)
-        throw new Error("Chunk HTTP " + resp.status);
-      const buf = await resp.arrayBuffer();
+    step("Getting model size…");
+    const head  = await fetch(MODEL_BASE + "onnx/text_model_quantized.onnx", {method:"HEAD"});
+    const total = parseInt(head.headers.get("content-length")||"0");
+    const chunks=[]; let done=0;
+    while (done<total) {
+      const end = Math.min(done+CHUNK-1, total-1);
+      const r = await fetch(MODEL_BASE + "onnx/text_model_quantized.onnx",
+                            {headers:{Range:`bytes=${done}-${end}`}});
+      if (!r.ok && r.status!==206) throw new Error("HTTP "+r.status);
+      const buf = await r.arrayBuffer();
       chunks.push(new Uint8Array(buf));
       done += buf.byteLength;
       step("Downloading " + Math.round(done/total*100) + "%…");
     }
-
     const merged = new Uint8Array(chunks.reduce((s,c)=>s+c.length,0));
-    let pos = 0; for (const c of chunks) { merged.set(c,pos); pos+=c.length; }
+    let pos=0; for (const c of chunks) { merged.set(c,pos); pos+=c.length; }
     modelBuffer = merged.buffer;
-
     try {
-      await new Promise((res) => {
-        const req = indexedDB.open("pixory-model", 1);
+      await new Promise(res => {
+        const req = indexedDB.open("pixory-model",1);
         req.onupgradeneeded = e => e.target.result.createObjectStore("m");
         req.onsuccess = e => {
           const tx = e.target.result.transaction("m","readwrite");
           tx.objectStore("m").put(modelBuffer, IDB_KEY);
-          tx.oncomplete = res; tx.onerror = res;
+          tx.oncomplete=res; tx.onerror=res;
         };
-        req.onerror = res;
+        req.onerror=res;
       });
-      step("Saved to cache ✅");
-    } catch(e) { /* cache optional */ }
+    } catch(e) {}
   }
 
-  // ── Tokenizer ─────────────────────────────────────────────────────────────
+  // ── Load tokenizer (2MB JSON) ──────────────────────────────────────────────
   step("Loading tokenizer…");
-  if (Tf.env) {
-    Tf.env.allowLocalModels = false;
-    Tf.env.backends.onnx.wasm.wasmPaths =
-      "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
-  }
-  const tokenizer = await AutoTok.from_pretrained(MODEL_BASE);
+  const tj = await (await fetch(MODEL_BASE + "tokenizer.json")).json();
+  const tokenizer = new CLIPTokenizer(tj.model.vocab, tj.model.merges);
 
-  // ── ONNX session from buffer ───────────────────────────────────────────────
+  // ── ONNX session ───────────────────────────────────────────────────────────
   step("Creating ONNX session…");
   ort.env.wasm.wasmPaths =
     "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
   const session = await ort.InferenceSession.create(modelBuffer,
-    { executionProviders: ["wasm"] });
+    {executionProviders:["wasm"]});
 
   step("AI ready ✓");
 
   window._encodeText = async (query) => {
-    const inp  = tokenizer([query], { padding:true, truncation:true, max_length:77 });
-    const ids  = inp.input_ids.data;
-    const mask = inp.attention_mask.data;
-    const n    = ids.length;
-    const out  = await session.run({
-      input_ids:      new ort.Tensor("int64", BigInt64Array.from(ids,  BigInt), [1,n]),
-      attention_mask: new ort.Tensor("int64", BigInt64Array.from(mask, BigInt), [1,n]),
+    const {inputIds, attMask} = tokenizer.tokenize(query);
+    const n = inputIds.length;
+    const out = await session.run({
+      input_ids:      new ort.Tensor("int64", BigInt64Array.from(inputIds, BigInt), [1,n]),
+      attention_mask: new ort.Tensor("int64", BigInt64Array.from(attMask,  BigInt), [1,n]),
     });
-    const vec  = new Float32Array(Object.values(out).at(-1).data);
-    let norm = 0;
-    for (let i=0;i<vec.length;i++) norm += vec[i]*vec[i];
-    norm = Math.sqrt(norm);
-    for (let i=0;i<vec.length;i++) vec[i] /= norm;
+    const vec = new Float32Array(Object.values(out).at(-1).data);
+    let norm=0; for (let i=0;i<vec.length;i++) norm+=vec[i]*vec[i];
+    norm=Math.sqrt(norm);
+    for (let i=0;i<vec.length;i++) vec[i]/=norm;
     return vec;
   };
 }
