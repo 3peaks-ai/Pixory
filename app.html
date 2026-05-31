@@ -325,6 +325,33 @@ body {
 </div>
 
 <script>
+// ── Global error trap (survives any try/catch failure) ─────────────────────
+const _dbgBar = () => document.getElementById("tg-debug");
+const _showErr = (msg) => {
+  console.error("[Pixory fatal]", msg);
+  const d = _dbgBar();
+  if (d) { d.textContent = "💀 " + msg.slice(0, 150); d.style.color = "#FF453A"; }
+  // Force loading screen to stay visible with error
+  const ls = document.getElementById("loading-screen");
+  if (ls) {
+    ls.style.display = "flex";
+    ls.style.zIndex  = "9999";
+    const lm = document.getElementById("loading-msg");
+    if (lm && !lm.innerHTML.includes("Retry"))
+      lm.innerHTML = `<div style="color:#FF453A;font-size:14px">${msg.slice(0,200)}</div>
+        <button onclick="location.reload()" style="margin-top:16px;background:#0A84FF;
+          color:#fff;border:none;border-radius:10px;padding:12px 28px;font-size:15px">
+          Retry</button>`;
+  }
+};
+window.onerror = (msg, src, line, col, err) => {
+  _showErr((err?.message || msg) + " (L" + line + ")");
+  return true;
+};
+window.onunhandledrejection = (e) => {
+  _showErr("Promise: " + (e.reason?.message || String(e.reason)));
+};
+
 // ── Security: verify Telegram WebApp initData ─────────────────────────────
 const tg = window.Telegram?.WebApp;
 if (tg) {
