@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- Load AI libraries statically — dynamic import() crashes Telegram WebView -->
+  <!-- Telegram Mini App SDK — required for window.Telegram.WebApp -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     // Must be set BEFORE ort.min.js loads — ORT fetches WASM immediately on init
     var ortWasmPath = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
@@ -13,7 +14,7 @@
   <script>
     // Set again after load to be sure
     if (typeof ort !== "undefined" && ort.env && ort.env.wasm) {
-      ort.env.wasm.wasmPaths = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
+      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
       ort.env.wasm.numThreads = 1;
     }
   </script>
@@ -969,22 +970,11 @@ async function loadCLIP() {
 
   // ── Download model if not cached ───────────────────────────────────────────
   if (!modelBuffer) {
-    step("Downloading model…");
+    step("Downloading model (~120 MB)…");
     const resp = await fetch(R2 + "onnx/text_model_quantized.onnx");
     if (!resp.ok) throw new Error("HTTP " + resp.status);
-    const total = parseInt(resp.headers.get("content-length") || "0");
-    const reader = resp.body.getReader();
-    const chunks = []; let done = 0;
-    while (true) {
-      const {value, done: fin} = await reader.read();
-      if (fin) break;
-      chunks.push(value); done += value.length;
-      const pct = total > 0 ? Math.round(done/total*100) : "?";
-      step("Downloading " + pct + "% (" + (done/1e6|0) + " MB)…");
-    }
-    const merged = new Uint8Array(chunks.reduce((s,c)=>s+c.length,0));
-    let pos=0; for (const c of chunks) { merged.set(c,pos); pos+=c.length; }
-    modelBuffer = merged.buffer;
+    modelBuffer = await resp.arrayBuffer();
+    step("Download complete (" + (modelBuffer.byteLength/1e6|0) + " MB)");
     try {
       await new Promise(res => {
         const req = indexedDB.open("pixory-model", 1);
@@ -1106,8 +1096,11 @@ let cachedCC     = null;
 
 async function init() {
   const tgAlert = (m) => {
-    try { window.Telegram?.WebApp?.showAlert(m); } catch(e) {}
     console.error("[init]", m);
+    try { window.Telegram?.WebApp?.showAlert(m); } catch(e) {}
+    try { setLoading(m); } catch(e) {}
+    const d=document.getElementById("tg-debug");
+    if(d) d.textContent=m;
   };
   try {
     tgAlert("init start");
