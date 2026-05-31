@@ -18,7 +18,6 @@
       ort.env.wasm.numThreads = 1;
     }
   </script>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' https://huggingface.co https://cdn.jsdelivr.net https://telegram.org https://*.workers.dev; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; worker-src blob:; object-src 'none'; base-uri 'self';">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Pixory</title>
@@ -1104,6 +1103,13 @@ async function init() {
   };
   try {
     tgAlert("init start");
+    // Quick fetch test to confirm network works inside app
+    try {
+      const r = await fetch("https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/config.json");
+      tgAlert("fetch test: HTTP " + r.status + (r.ok ? " OK" : " FAIL"));
+    } catch(e) {
+      tgAlert("fetch test FAIL: " + e.message);
+    }
     try { db = await openDB(); tgAlert("openDB ok"); }
     catch(e) { tgAlert("openDB FAIL: " + e.message); }
 
