@@ -847,10 +847,10 @@ async function loadCLIP() {
     console.log("[Pixory] Transformers.js env configured, loading model...");
     // L/14 text encoder — client-side only, queries never leave device
     // Use HuggingFace repo ID — Transformers.js adds the base URL automatically
-    const MODEL_ID = "3Peaks-AI/pixory-clip-text";
-
-    // Step-by-step diagnostic: test each file individually
-    const MODEL_BASE = "https://huggingface.co/" + MODEL_ID + "/resolve/main/";
+    // Model hosted on Cloudflare R2 — same CDN as Worker, reliable in Telegram
+    // 🔴 SECURITY: model + photos + worker on same CF account — see Sprint 4 P0
+    const MODEL_BASE = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
+    const MODEL_ID   = MODEL_BASE;  // Transformers.js accepts full URL as model ID
     const testFiles = ["config.json", "tokenizer.json",
                        "onnx/text_model_quantized.onnx"];
 
@@ -872,8 +872,8 @@ async function loadCLIP() {
 
     setLoading("Loading AI model (~120 MB, first time only)…");
     [clipTokenizer, clipTextModel] = await Promise.all([
-      AutoTokenizer.from_pretrained(MODEL_ID),
-      CLIPTextModelWithProjection.from_pretrained(MODEL_ID, { quantized: true }),
+      AutoTokenizer.from_pretrained(MODEL_BASE),
+      CLIPTextModelWithProjection.from_pretrained(MODEL_BASE, { quantized: true }),
     ]);
     setLoading("AI model ready ✓");
   } catch (e) {
