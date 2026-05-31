@@ -869,14 +869,23 @@ async function loadCLIP() {
   } catch (e) {
     console.error("[Pixory] Model load failed:", e);
     const msg = e?.message || String(e);
-    // Show error visibly — red text in the loading screen
-    setLoading("❌ " + msg.slice(0, 100));
+
+    // Keep loading screen visible — don't proceed without the model
+    const loadScr = document.getElementById("loading-screen");
+    if (loadScr) loadScr.style.display = "flex";
+
+    document.getElementById("loading-msg").innerHTML =
+      `<div style="color:#FF453A;font-size:16px;margin-bottom:12px">❌ Model failed to load</div>
+       <div style="color:#FF453A;font-size:12px;margin-bottom:16px">${msg.slice(0,120)}</div>
+       <button onclick="location.reload()" style="background:#0A84FF;color:white;border:none;
+         border-radius:12px;padding:12px 24px;font-size:15px;cursor:pointer">
+         Retry
+       </button>`;
+
     const sub = document.getElementById("load-detail");
-    if (sub) {
-      sub.style.color = "#FF453A";
-      sub.textContent = "Check DevTools console for details. Error: " + msg.slice(0, 120);
-    }
-    // Don't throw — let the app remain open so user can see the error
+    if (sub) sub.textContent = "Tap Retry to try again. Make sure you have internet connection.";
+
+    throw e; // stop init() from continuing without model
   }
 }
 
