@@ -942,15 +942,14 @@ async function loadCLIP() {
     setLoading(msg);
   };
 
+  // CORS now configured on R2 — simple fetch works for any size ✅
+  const R2 = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
+
   step("Checking ORT…");
-  if (typeof ort === "undefined") throw new Error("ort.min.js not loaded");
+  if (typeof ort === "undefined") throw new Error("ort.min.js failed to load");
 
-  const MODEL_BASE = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
-  const IDB_KEY    = "pixory-clip-l14-v1";
-  const CHUNK      = 10 * 1024 * 1024;
-
-  // ── IDB cache ─────────────────────────────────────────────────────────────
-  step("Opening cache…");
+  // ── Check IndexedDB cache ──────────────────────────────────────────────────
+  step("Checking cache…");
   let modelBuffer = null;
   try {
     modelBuffer = await new Promise(res => {
@@ -958,19 +957,20 @@ async function loadCLIP() {
       req.onupgradeneeded = e => e.target.result.createObjectStore("m");
       req.onsuccess = e => {
         const r = e.target.result.transaction("m","readonly")
-                   .objectStore("m").get(IDB_KEY);
-        r.onsuccess = () => res(r.result||null);
+                   .objectStore("m").get("clip-l14-v1");
+        r.onsuccess = () => res(r.result || null);
         r.onerror   = () => res(null);
       };
       req.onerror = () => res(null);
     });
-    if (modelBuffer) step("Cached ✅ " + (modelBuffer.byteLength/1e6|0) + " MB");
-  } catch(e) { step("No cache, downloading…"); }
+    if (modelBuffer)
+      step("From cache ✅ " + (modelBuffer.byteLength/1e6|0) + " MB");
+  } catch(e) { step("No cache…"); }
 
-  // ── Streaming download (no Range headers, no HEAD request) ─────────────────
+  // ── Download model if not cached ───────────────────────────────────────────
   if (!modelBuffer) {
-    step("Starting download…");
-    const resp = await fetch(MODEL_BASE + "onnx/text_model_quantized.onnx");
+    step("Downloading model…");
+    const resp = await fetch(R2 + "onnx/text_model_quantized.onnx");
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const total = parseInt(resp.headers.get("content-length") || "0");
     const reader = resp.body.getReader();
@@ -978,8 +978,7 @@ async function loadCLIP() {
     while (true) {
       const {value, done: fin} = await reader.read();
       if (fin) break;
-      chunks.push(value);
-      done += value.length;
+      chunks.push(value); done += value.length;
       const pct = total > 0 ? Math.round(done/total*100) : "?";
       step("Downloading " + pct + "% (" + (done/1e6|0) + " MB)…");
     }
@@ -988,29 +987,28 @@ async function loadCLIP() {
     modelBuffer = merged.buffer;
     try {
       await new Promise(res => {
-        const req = indexedDB.open("pixory-model",1);
+        const req = indexedDB.open("pixory-model", 1);
         req.onupgradeneeded = e => e.target.result.createObjectStore("m");
         req.onsuccess = e => {
           const tx = e.target.result.transaction("m","readwrite");
-          tx.objectStore("m").put(modelBuffer, IDB_KEY);
-          tx.oncomplete=res; tx.onerror=res;
+          tx.objectStore("m").put(modelBuffer, "clip-l14-v1");
+          tx.oncomplete = res; tx.onerror = res;
         };
-        req.onerror=res;
+        req.onerror = res;
       });
+      step("Saved to cache ✅");
     } catch(e) {}
   }
 
-  // ── Load tokenizer (2MB JSON) ──────────────────────────────────────────────
+  // ── Load tokenizer ─────────────────────────────────────────────────────────
   step("Loading tokenizer…");
-  const tj = await (await fetch(MODEL_BASE + "tokenizer.json")).json();
+  const tj = await (await fetch(R2 + "tokenizer.json")).json();
   const tokenizer = new CLIPTokenizer(tj.model.vocab, tj.model.merges);
 
-  // ── ONNX session ───────────────────────────────────────────────────────────
+  // ── Create ONNX session ────────────────────────────────────────────────────
   step("Creating ONNX session…");
-  ort.env.wasm.wasmPaths =
-    "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
   const session = await ort.InferenceSession.create(modelBuffer,
-    {executionProviders:["wasm"]});
+    { executionProviders: ["wasm"] });
 
   step("AI ready ✓");
 
@@ -1022,9 +1020,9 @@ async function loadCLIP() {
       attention_mask: new ort.Tensor("int64", BigInt64Array.from(attMask,  BigInt), [1,n]),
     });
     const vec = new Float32Array(Object.values(out).at(-1).data);
-    let norm=0; for (let i=0;i<vec.length;i++) norm+=vec[i]*vec[i];
+    let norm=0; for(let i=0;i<vec.length;i++) norm+=vec[i]*vec[i];
     norm=Math.sqrt(norm);
-    for (let i=0;i<vec.length;i++) vec[i]/=norm;
+    for(let i=0;i<vec.length;i++) vec[i]/=norm;
     return vec;
   };
 }
@@ -1076,8 +1074,18 @@ function setLoading(msg) {
 }
 
 function showError(msg) {
-  document.getElementById("error-msg").textContent = msg;
-  setState("state-error");
+  console.error("[Pixory error]", msg);
+  // Show error inside loading screen — stays visible
+  const dbg = document.getElementById("tg-debug");
+  if (dbg) { dbg.textContent = "❌ " + msg; dbg.style.color = "#FF453A"; }
+  setLoading("❌ " + msg.slice(0, 100));
+  const sub = document.getElementById("load-detail");
+  if (sub) sub.textContent = "Tap to retry";
+  setState("state-loading");  // keep loading screen visible
+  // Also try state-error as fallback
+  try {
+    document.getElementById("error-msg").textContent = msg;
+  } catch(e) {}
 }
 
 function showImport() {
