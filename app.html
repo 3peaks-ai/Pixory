@@ -844,31 +844,25 @@ async function loadCLIP() {
     env.allowLocalModels = false;
 
     console.log("[Pixory] Transformers.js env configured, loading model...");
-    [clipTokenizer, clipTextModel] = await Promise.all([
-      // L/14 text encoder from HuggingFace (one-time ~120 MB download)
-    // Queries NEVER sent to server — all inference is client-side
+    // L/14 text encoder — client-side only, queries never leave device
     const MODEL_URL = "https://huggingface.co/3Peaks-AI/pixory-clip-text/resolve/main/";
 
-    // Quick connectivity test before loading the full model
+    // Connectivity test before downloading 120MB
     try {
       const testResp = await fetch(MODEL_URL + "config.json");
-      if (!testResp.ok) throw new Error("config.json returned " + testResp.status);
+      if (!testResp.ok) throw new Error("config.json HTTP " + testResp.status);
       console.log("[Pixory] HuggingFace reachable ✅");
     } catch (connErr) {
-      console.warn("[Pixory] HuggingFace unreachable:", connErr.message);
-      setLoading("❌ Cannot reach model server: " + connErr.message);
+      setLoading("❌ Cannot reach model: " + connErr.message);
       return;
     }
 
     setLoading("Loading AI model (~120 MB, first time only)…");
-    try {
-      // quantized:false → looks for onnx/text_model.onnx
-      // quantized:true  → looks for onnx/text_model_quantized.onnx
-      [clipTokenizer, clipTextModel] = await Promise.all([
-        AutoTokenizer.from_pretrained(MODEL_URL),
-        CLIPTextModelWithProjection.from_pretrained(MODEL_URL, { quantized: true }),
-      ]);
-      setLoading("AI model ready ✓");
+    [clipTokenizer, clipTextModel] = await Promise.all([
+      AutoTokenizer.from_pretrained(MODEL_URL),
+      CLIPTextModelWithProjection.from_pretrained(MODEL_URL, { quantized: true }),
+    ]);
+    setLoading("AI model ready ✓");
   } catch (e) {
     console.error("[Pixory] Model load failed:", e);
     const msg = e?.message || String(e);
