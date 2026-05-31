@@ -1105,16 +1105,25 @@ let cachedThumbs = null;
 let cachedCC     = null;
 
 async function init() {
+  const tgAlert = (m) => {
+    try { window.Telegram?.WebApp?.showAlert(m); } catch(e) {}
+    console.error("[init]", m);
+  };
   try {
-    setLoading("init: openDB…");
-    db = await openDB();
-    setLoading("init: loadServeToken…");
-    await loadServeToken();
-    setLoading("init: loadShardBlob…");
-    await loadShardBlob();
-    setLoading("init: loadThumbOffsets…");
-    _thumbOffsets = await loadThumbOffsets();
-    setLoading("init: loadCLIP…");
+    tgAlert("init start");
+    try { db = await openDB(); tgAlert("openDB ok"); }
+    catch(e) { tgAlert("openDB FAIL: " + e.message); }
+
+    try { await loadServeToken(); tgAlert("token ok"); }
+    catch(e) { tgAlert("token FAIL: " + e.message); }
+
+    try { await loadShardBlob(); tgAlert("shard ok"); }
+    catch(e) { tgAlert("shard FAIL: " + e.message); }
+
+    try { _thumbOffsets = await loadThumbOffsets(); tgAlert("offsets ok"); }
+    catch(e) { tgAlert("offsets FAIL: " + e.message); }
+
+    tgAlert("calling loadCLIP…");
     await loadCLIP();
 
     const count = await countVectors(db);
