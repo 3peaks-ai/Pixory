@@ -1124,15 +1124,20 @@ async function init() {
 
     tgAlert("calling loadCLIP…");
     await loadCLIP();
+    tgAlert("loadCLIP done ✅");
 
     const count = await countVectors(db);
+    tgAlert("vectors count: " + count);
+
     if (count === 0) {
+      tgAlert("no vectors → state-import");
       setState("state-import");
       return;
     }
 
-    setLoading(`Loading ${count} vectors from storage…`);
+    setLoading(`Loading ${count} vectors…`);
     await loadVectorsFromDB();
+    tgAlert("vectors loaded → state-ready");
     setState("state-ready");
     document.getElementById("status-bar").textContent =
       `${count} photos indexed — try "beach sunset" or "family dinner"`;
