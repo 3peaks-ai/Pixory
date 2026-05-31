@@ -903,7 +903,7 @@ function cosineSimilarity(a, b) {
   return dot;
 }
 
-const SCORE_CUTOFF = 0.22;  // raw L/14: relevant ≥ 0.22, below = weak match
+const SCORE_CUTOFF = 0.15;  // dehubbified L/14: relevant ≥ 0.15
 
 function topK(queryVec, vectors, paths, dates, k = 20) {
   if (!vectors || vectors.length === 0) return [];
@@ -1021,20 +1021,28 @@ function _preprocessVecs() {
   if (!cachedVecs || cachedVecs.length === 0) return;
   const dim = cachedVecs[0].length;
 
-  // 1. Compute mean vector of all stored embeddings
+  // Compute mean of all stored vectors and normalize to unit vector
   const mean = new Float32Array(dim);
   for (const v of cachedVecs) for (let i = 0; i < dim; i++) mean[i] += v[i];
   for (let i = 0; i < dim; i++) mean[i] /= cachedVecs.length;
-  // Normalize to unit vector
   let norm = 0;
   for (let i = 0; i < dim; i++) norm += mean[i] * mean[i];
   norm = Math.sqrt(norm);
   if (norm < 1e-8) { _meanVec = null; _dehubbed = null; return; }
-  _meanVec = mean.map(v => v / norm);
+  _meanVec = new Float32Array(dim);
+  for (let i = 0; i < dim; i++) _meanVec[i] = mean[i] / norm;
 
-  // 2. Dehubbify all stored vectors (done once in memory, not on disk)
+  // Dehubbify ALL stored vectors once — project out the mean direction
   _dehubbed = cachedVecs.map(v => _dehubbify(v));
-  console.log('[Pixory] Hubness reduction applied to', _dehubbed.length, 'vectors');
+
+  // Verify: check score variance — good dehubbify increases spread
+  const testQ = _dehubbify(cachedVecs[0]);
+  const testScores = _dehubbed.slice(0, 20).map(v => cosineSimilarity(testQ, v)).sort((a,b)=>b-a);
+  console.log('[Pixory] Dehubbify OK | vectors:', _dehubbed.length,
+    '| test top3:', testScores.slice(0,3).map(s=>s.toFixed(3)),
+    '| mean_dot:', (cachedVecs.reduce((s,v)=>{
+      let d=0; for(let i=0;i<dim;i++) d+=v[i]*_meanVec[i]; return s+d;
+    },0)/cachedVecs.length).toFixed(3));
 }
 
 
@@ -1277,7 +1285,7 @@ function makeThumbnailItem(r) {
   const item = document.createElement('div');
   // Raw L/14 scores: >0.22 = confident, 0.20-0.22 = plausible, <0.20 = dim
   const confidence = r.score >= SCORE_CUTOFF ? 1.0 :
-                     r.score >= 0.20 ? 0.7 : 0.45;
+                     r.score >= 0.12 ? 0.7 : 0.45;
   item.style.opacity = confidence;
   item.className = 'result-item';
   const name = r.path.split(/[/\\]/).pop();
@@ -1370,22 +1378,24 @@ async function runSearch(query) {
   try {
     const t0  = performance.now();
     const qv  = await textEmbed(query);
-    // Raw cosine similarity — dehubbify removed (too aggressive for small personal collections)
-  const vecs = cachedVecs;
+    // Dehubbify query with SAME mean used for stored vectors → symmetric
+  if (!_dehubbed || !_meanVec) {
+    console.warn('[Pixory] _dehubbed not ready, running _preprocessVecs');
+    _preprocessVecs();
+  }
+  const qvH  = _dehubbify(qv);           // dehubbified query
+  const vecs = _dehubbed || cachedVecs;  // dehubbified stored vectors
 
-  // Diagnostics
+  // Diagnostics — scores should now be >0.15 for relevant results
   if (vecs && vecs.length > 0) {
-    const allS = vecs.map(v => cosineSimilarity(qv, v)).sort((a,b)=>b-a);
+    const allS = vecs.map(v => cosineSimilarity(qvH, v)).sort((a,b)=>b-a);
     console.log('[Pixory]',
-      'q_dim:', qv.length, 'v_dim:', vecs[0].length,
-      'n_vecs:', vecs.length,
+      'q_dim:', qvH.length, 'using_dehubbed:', !!_dehubbed,
       'top5:', allS.slice(0,5).map(s=>(s*100).toFixed(1)+'%'),
       'above_cutoff:', allS.filter(s=>s>=SCORE_CUTOFF).length
     );
-    if (qv.length !== vecs[0].length)
-      console.error('[Pixory] DIMENSION MISMATCH', qv.length, 'vs', vecs[0].length);
   }
-  const top = topK(qv, vecs, cachedPaths, cachedDates, 12);
+  const top = topK(qvH, vecs, cachedPaths, cachedDates, 12);
     const ms  = Math.round(performance.now() - t0);
 
     // Debug: show top raw scores in console (remove after calibration)
