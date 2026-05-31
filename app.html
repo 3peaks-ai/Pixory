@@ -4,16 +4,16 @@
   <!-- Load AI libraries statically — dynamic import() crashes Telegram WebView -->
   <script>
     // Must be set BEFORE ort.min.js loads — ORT fetches WASM immediately on init
-    var ortWasmPath = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+    var ortWasmPath = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
     if (typeof self !== "undefined") {
       self.ortWasmPath = ortWasmPath;
     }
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"></script>
+  <script src="https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/ort.min.js"></script>
   <script>
     // Set again after load to be sure
     if (typeof ort !== "undefined" && ort.env && ort.env.wasm) {
-      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+      ort.env.wasm.wasmPaths = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
       ort.env.wasm.numThreads = 1;
     }
   </script>
