@@ -2,7 +2,21 @@
 <html lang="en">
 <head>
   <!-- Load AI libraries statically — dynamic import() crashes Telegram WebView -->
+  <script>
+    // Must be set BEFORE ort.min.js loads — ORT fetches WASM immediately on init
+    var ortWasmPath = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+    if (typeof self !== "undefined") {
+      self.ortWasmPath = ortWasmPath;
+    }
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"></script>
+  <script>
+    // Set again after load to be sure
+    if (typeof ort !== "undefined" && ort.env && ort.env.wasm) {
+      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+      ort.env.wasm.numThreads = 1;
+    }
+  </script>
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' https://huggingface.co https://cdn.jsdelivr.net https://telegram.org https://*.workers.dev; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; worker-src blob:; object-src 'none'; base-uri 'self';">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
@@ -961,21 +975,21 @@ async function loadCLIP() {
     if (modelBuffer) step("Cached ✅ " + (modelBuffer.byteLength/1e6|0) + " MB");
   } catch(e) { step("No cache, downloading…"); }
 
-  // ── Chunked download ───────────────────────────────────────────────────────
+  // ── Streaming download (no Range headers, no HEAD request) ─────────────────
   if (!modelBuffer) {
-    step("Getting model size…");
-    const head  = await fetch(MODEL_BASE + "onnx/text_model_quantized.onnx", {method:"HEAD"});
-    const total = parseInt(head.headers.get("content-length")||"0");
-    const chunks=[]; let done=0;
-    while (done<total) {
-      const end = Math.min(done+CHUNK-1, total-1);
-      const r = await fetch(MODEL_BASE + "onnx/text_model_quantized.onnx",
-                            {headers:{Range:`bytes=${done}-${end}`}});
-      if (!r.ok && r.status!==206) throw new Error("HTTP "+r.status);
-      const buf = await r.arrayBuffer();
-      chunks.push(new Uint8Array(buf));
-      done += buf.byteLength;
-      step("Downloading " + Math.round(done/total*100) + "%…");
+    step("Starting download…");
+    const resp = await fetch(MODEL_BASE + "onnx/text_model_quantized.onnx");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const total = parseInt(resp.headers.get("content-length") || "0");
+    const reader = resp.body.getReader();
+    const chunks = []; let done = 0;
+    while (true) {
+      const {value, done: fin} = await reader.read();
+      if (fin) break;
+      chunks.push(value);
+      done += value.length;
+      const pct = total > 0 ? Math.round(done/total*100) : "?";
+      step("Downloading " + pct + "% (" + (done/1e6|0) + " MB)…");
     }
     const merged = new Uint8Array(chunks.reduce((s,c)=>s+c.length,0));
     let pos=0; for (const c of chunks) { merged.set(c,pos); pos+=c.length; }
