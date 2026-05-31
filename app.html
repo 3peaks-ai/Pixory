@@ -903,7 +903,7 @@ function cosineSimilarity(a, b) {
   return dot;
 }
 
-const SCORE_CUTOFF = 0.08;  // dehubbify reduces scores to ~0.08-0.12 range
+const SCORE_CUTOFF = 0.22;  // raw L/14: relevant ≥ 0.22, below = weak match
 
 function topK(queryVec, vectors, paths, dates, k = 20) {
   if (!vectors || vectors.length === 0) return [];
@@ -1275,8 +1275,9 @@ function renderBrowseBatch() {
 // ── Shared thumbnail item factory ─────────────────────────────────────────────
 function makeThumbnailItem(r) {
   const item = document.createElement('div');
+  // Raw L/14 scores: >0.22 = confident, 0.20-0.22 = plausible, <0.20 = dim
   const confidence = r.score >= SCORE_CUTOFF ? 1.0 :
-                     r.score >= SCORE_CUTOFF - 0.05 ? 0.75 : 0.5;
+                     r.score >= 0.20 ? 0.7 : 0.45;
   item.style.opacity = confidence;
   item.className = 'result-item';
   const name = r.path.split(/[/\\]/).pop();
@@ -1369,25 +1370,22 @@ async function runSearch(query) {
   try {
     const t0  = performance.now();
     const qv  = await textEmbed(query);
-    // Apply same dehubbify to query as was applied to stored vectors
-  const qvH = _dehubbify(qv);
-  const vecs = _dehubbed || cachedVecs;
+    // Raw cosine similarity — dehubbify removed (too aggressive for small personal collections)
+  const vecs = cachedVecs;
 
-  // Diagnostics — open browser console to see
+  // Diagnostics
   if (vecs && vecs.length > 0) {
-    const allS = vecs.map(v => cosineSimilarity(qvH, v)).sort((a,b)=>b-a);
+    const allS = vecs.map(v => cosineSimilarity(qv, v)).sort((a,b)=>b-a);
     console.log('[Pixory]',
-      'q_dim:', qvH.length, 'v_dim:', vecs[0].length,
-      'n_vecs:', vecs.length, 'dehubbify:', !!_dehubbed,
-      'top5:', allS.slice(0,5).map(s=>s.toFixed(3)),
+      'q_dim:', qv.length, 'v_dim:', vecs[0].length,
+      'n_vecs:', vecs.length,
+      'top5:', allS.slice(0,5).map(s=>(s*100).toFixed(1)+'%'),
       'above_cutoff:', allS.filter(s=>s>=SCORE_CUTOFF).length
     );
-    if (qvH.length !== vecs[0].length)
-      console.error('[Pixory] DIMENSION MISMATCH', qvH.length, 'vs', vecs[0].length);
-    if (allS[0] < 0.10)
-      console.warn('[Pixory] max score only', allS[0].toFixed(3), '- possible model mismatch');
+    if (qv.length !== vecs[0].length)
+      console.error('[Pixory] DIMENSION MISMATCH', qv.length, 'vs', vecs[0].length);
   }
-  const top = topK(qvH, vecs, cachedPaths, cachedDates, 12);
+  const top = topK(qv, vecs, cachedPaths, cachedDates, 12);
     const ms  = Math.round(performance.now() - t0);
 
     // Debug: show top raw scores in console (remove after calibration)
