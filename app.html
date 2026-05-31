@@ -253,6 +253,13 @@ body {
   <div class="spinner"></div>
   <div class="loading-text" id="loading-msg">Loading AI model…</div>
   <div id="load-detail" style="color:#555;font-size:11px;margin-top:4px">
+  <div style="margin-top:12px">
+    <button onclick="window._testSizes()" style="background:#1C1C1E;color:#0A84FF;
+      border:1px solid #0A84FF;border-radius:8px;padding:6px 12px;font-size:12px">
+      Test fetch limits
+    </button>
+  </div>
+
     First launch: ~120 MB (cached forever)</div>
 </div>
 
@@ -1603,6 +1610,30 @@ if (location.protocol === 'file:') {
 } else {
   init();
 }
+
+// ── Fetch size test ────────────────────────────────────────────────────────
+window._testSizes = async () => {
+  const base = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
+  const dbg  = document.getElementById("tg-debug");
+  for (const mb of [30, 50, 70]) {
+    const url = base + "test_" + mb + "mb.bin";
+    try {
+      setLoading("Testing " + mb + " MB fetch…");
+      if (dbg) dbg.textContent = "Testing " + mb + "MB…";
+      const r = await fetch(url);
+      await r.arrayBuffer();
+      const msg = "✅ " + mb + " MB OK";
+      setLoading(msg); if (dbg) dbg.textContent = msg;
+      await new Promise(r=>setTimeout(r,2000));
+    } catch(e) {
+      const msg = "❌ " + mb + " MB FAIL: " + e.message;
+      setLoading(msg); if (dbg) dbg.textContent = msg;
+      await new Promise(r=>setTimeout(r,3000));
+      break;
+    }
+  }
+  setLoading("Test done — see results above");
+};
 </script>
 </body>
 </html>
