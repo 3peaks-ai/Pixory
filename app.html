@@ -253,11 +253,6 @@ body {
   <div class="spinner"></div>
   <div class="loading-text" id="loading-msg">Loading AI model…</div>
   <div id="load-detail" style="color:#555;font-size:11px;margin-top:4px">First launch: ~120 MB (cached forever)</div>
-  <button onclick="window._testSizes()" style="margin-top:20px;background:transparent;
-    color:#48484A;border:1px solid #3A3A3C;border-radius:8px;
-    padding:8px 16px;font-size:12px;cursor:pointer">
-    🔬 Test fetch limits
-  </button>
 <div id="state-import">
   <div class="import-card">
     <h2>📁 Import your library</h2>
@@ -333,32 +328,7 @@ body {
 </div>
 
 <script>
-// ── Global error trap (survives any try/catch failure) ─────────────────────
-const _dbgBar = () => document.getElementById("tg-debug");
-const _showErr = (msg) => {
-  console.error("[Pixory fatal]", msg);
-  const d = _dbgBar();
-  if (d) { d.textContent = "💀 " + msg.slice(0, 150); d.style.color = "#FF453A"; }
-  // Force loading screen to stay visible with error
-  const ls = document.getElementById("loading-screen");
-  if (ls) {
-    ls.style.display = "flex";
-    ls.style.zIndex  = "9999";
-    const lm = document.getElementById("loading-msg");
-    if (lm && !lm.innerHTML.includes("Retry"))
-      lm.innerHTML = `<div style="color:#FF453A;font-size:14px">${msg.slice(0,200)}</div>
-        <button onclick="location.reload()" style="margin-top:16px;background:#0A84FF;
-          color:#fff;border:none;border-radius:10px;padding:12px 28px;font-size:15px">
-          Retry</button>`;
-  }
-};
-window.onerror = (msg, src, line, col, err) => {
-  _showErr((err?.message || msg) + " (L" + line + ")");
-  return true;
-};
-window.onunhandledrejection = (e) => {
-  _showErr("Promise: " + (e.reason?.message || String(e.reason)));
-};
+// Global error handlers removed
 
 // ── Security: verify Telegram WebApp initData ─────────────────────────────
 const tg = window.Telegram?.WebApp;
@@ -1094,43 +1064,28 @@ let cachedThumbs = null;
 let cachedCC     = null;
 
 async function init() {
-  const tgAlert = (m) => {
-    console.error("[init]", m);
-    try { window.Telegram?.WebApp?.showAlert(m); } catch(e) {}
-    try { setLoading(m); } catch(e) {}
-    const d=document.getElementById("tg-debug");
-    if(d) d.textContent=m;
-  };
   try {
-    tgAlert("init start");
     // Quick fetch test to confirm network works inside app
     try {
       const r = await fetch("https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/config.json");
-      tgAlert("fetch test: HTTP " + r.status + (r.ok ? " OK" : " FAIL"));
     } catch(e) {
-      tgAlert("fetch test FAIL: " + e.message);
     }
-    try { db = await openDB(); tgAlert("openDB ok"); }
-    catch(e) { tgAlert("openDB FAIL: " + e.message); }
+    try { db = await openDB(); }
+    catch(e) { }
 
-    try { await loadServeToken(); tgAlert("token ok"); }
-    catch(e) { tgAlert("token FAIL: " + e.message); }
+    try { await loadServeToken(); }
+    catch(e) { }
 
-    try { await loadShardBlob(); tgAlert("shard ok"); }
-    catch(e) { tgAlert("shard FAIL: " + e.message); }
+    try { await loadShardBlob(); }
+    catch(e) { }
 
-    try { _thumbOffsets = await loadThumbOffsets(); tgAlert("offsets ok"); }
-    catch(e) { tgAlert("offsets FAIL: " + e.message); }
-
-    tgAlert("calling loadCLIP…");
+    try { _thumbOffsets = await loadThumbOffsets(); }
+    catch(e) { }
     await loadCLIP();
-    tgAlert("loadCLIP done ✅");
 
     const count = await countVectors(db);
-    tgAlert("vectors count: " + count);
 
     if (count === 0) {
-      tgAlert("no vectors → state-import");
       setState("state-import");
       return;
     }
@@ -1138,13 +1093,10 @@ async function init() {
     setLoading(`Loading ${count} vectors…`);
     try {
       await loadVectorsFromDB();
-      tgAlert("loadVectorsFromDB done. cachedVecs: " + (cachedVecs||[]).length);
     } catch(ve) {
-      tgAlert("loadVectorsFromDB FAIL: " + ve.message);
     }
     setState("state-ready");
-    tgAlert("state-ready set ✅ — calling startBrowse");
-    try { startBrowse(); } catch(e) { tgAlert("startBrowse fail: " + e.message); }
+    try { startBrowse(); } catch(e) { }
     document.getElementById("status-bar").textContent =
       `${count} photos indexed — try "beach sunset" or "family dinner"`;
   } catch (err) {
@@ -1625,30 +1577,6 @@ if (location.protocol === 'file:') {
 } else {
   init();
 }
-
-// ── Fetch size test ────────────────────────────────────────────────────────
-window._testSizes = async () => {
-  const base = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
-  const dbg  = document.getElementById("tg-debug");
-  for (const mb of [30, 50, 70]) {
-    const url = base + "test_" + mb + "mb.bin";
-    try {
-      setLoading("Testing " + mb + " MB fetch…");
-      if (dbg) dbg.textContent = "Testing " + mb + "MB…";
-      const r = await fetch(url);
-      await r.arrayBuffer();
-      const msg = "✅ " + mb + " MB OK";
-      setLoading(msg); if (dbg) dbg.textContent = msg;
-      await new Promise(r=>setTimeout(r,2000));
-    } catch(e) {
-      const msg = "❌ " + mb + " MB FAIL: " + e.message;
-      setLoading(msg); if (dbg) dbg.textContent = msg;
-      await new Promise(r=>setTimeout(r,3000));
-      break;
-    }
-  }
-  setLoading("Test done — see results above");
-};
 </script>
 </body>
 </html>
