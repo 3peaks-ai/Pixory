@@ -845,12 +845,14 @@ async function loadCLIP() {
 
     console.log("[Pixory] Transformers.js env configured, loading model...");
     // L/14 text encoder — client-side only, queries never leave device
-    const MODEL_URL = "https://huggingface.co/3Peaks-AI/pixory-clip-text/resolve/main/";
+    // Use HuggingFace repo ID — Transformers.js adds the base URL automatically
+    const MODEL_ID = "3Peaks-AI/pixory-clip-text";
 
-    // Connectivity test before downloading 120MB
+    // Connectivity test
     try {
-      const testResp = await fetch(MODEL_URL + "config.json");
-      if (!testResp.ok) throw new Error("config.json HTTP " + testResp.status);
+      const testResp = await fetch(
+        "https://huggingface.co/" + MODEL_ID + "/resolve/main/config.json");
+      if (!testResp.ok) throw new Error("HTTP " + testResp.status);
       console.log("[Pixory] HuggingFace reachable ✅");
     } catch (connErr) {
       setLoading("❌ Cannot reach model: " + connErr.message);
@@ -859,8 +861,8 @@ async function loadCLIP() {
 
     setLoading("Loading AI model (~120 MB, first time only)…");
     [clipTokenizer, clipTextModel] = await Promise.all([
-      AutoTokenizer.from_pretrained(MODEL_URL),
-      CLIPTextModelWithProjection.from_pretrained(MODEL_URL, { quantized: true }),
+      AutoTokenizer.from_pretrained(MODEL_ID),
+      CLIPTextModelWithProjection.from_pretrained(MODEL_ID, { quantized: true }),
     ]);
     setLoading("AI model ready ✓");
   } catch (e) {
