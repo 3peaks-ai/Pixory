@@ -819,153 +819,122 @@ function _parseV3(buffer, view, dim, count) {
 }
 
 async function loadCLIP() {
-  // ── Chunked download + IndexedDB cache ─────────────────────────────────────
-  // iOS WKWebView can't fetch() 120MB into a single ArrayBuffer.
-  // Solution: download in 10MB chunks, cache in IndexedDB, assemble locally.
-  // Privacy: model runs entirely on device, queries never leave. ✅
-
-  const dbg = document.getElementById("tg-debug");
+  const dbg  = document.getElementById("tg-debug");
   const step = (msg) => {
     console.log("[Pixory]", msg);
     if (dbg) dbg.textContent = msg;
     setLoading(msg);
   };
 
-  const MODEL_BASE   = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
-  const MODEL_FILE   = "onnx/text_model_quantized.onnx";
-  const IDB_KEY      = "pixory-clip-l14-v1";
-  const CHUNK_SIZE   = 10 * 1024 * 1024;  // 10 MB
+  const MODEL_BASE = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
+  const MODEL_FILE = "onnx/text_model_quantized.onnx";
+  const IDB_KEY    = "pixory-clip-l14-v1";
 
-  // ── Step 1: check IndexedDB cache ─────────────────────────────────────────
-  step("Step 1: Opening local cache…");
-  async function idbGet(key) {
-    return new Promise((res, rej) => {
-      const req = indexedDB.open("pixory-model-cache", 1);
-      req.onupgradeneeded = e => e.target.result.createObjectStore("models");
+  // ── Try IndexedDB cache first ──────────────────────────────────────────────
+  step("Opening cache…");
+  let modelBuffer = null;
+
+  try {
+    modelBuffer = await new Promise((res) => {
+      const req = indexedDB.open("pixory-model", 1);
+      req.onupgradeneeded = e => e.target.result.createObjectStore("m");
       req.onsuccess = e => {
-        const tx = e.target.result.transaction("models", "readonly");
-        const r2 = tx.objectStore("models").get(key);
+        const r2 = e.target.result.transaction("m","readonly")
+                    .objectStore("m").get(IDB_KEY);
         r2.onsuccess = () => res(r2.result || null);
         r2.onerror   = () => res(null);
       };
       req.onerror = () => res(null);
     });
+    if (modelBuffer) step("Cache hit — " + (modelBuffer.byteLength/1e6).toFixed(0) + " MB");
+  } catch(e) {
+    console.warn("[Pixory] IDB unavailable:", e.message);
+    step("Cache unavailable, downloading fresh…");
   }
 
-  async function idbPut(key, value) {
-    return new Promise((res, rej) => {
-      const req = indexedDB.open("pixory-model-cache", 1);
-      req.onupgradeneeded = e => e.target.result.createObjectStore("models");
-      req.onsuccess = e => {
-        const tx = e.target.result.transaction("models", "readwrite");
-        tx.objectStore("models").put(value, key);
-        tx.oncomplete = () => res();
-        tx.onerror    = () => rej(tx.error);
-      };
-    });
-  }
-
-  // ── Step 2: load or download model ────────────────────────────────────────
-  let modelBuffer = await idbGet(IDB_KEY);
-
-  if (modelBuffer) {
-    step("Loading from cache…");
-    console.log("[Pixory] Model loaded from IndexedDB ✅", modelBuffer.byteLength);
-  } else {
-    // Get file size first
-    step("Step 2: Checking model size…");
-    const head = await fetch(MODEL_BASE + MODEL_FILE, { method: "HEAD" });
-    const totalSize = parseInt(head.headers.get("content-length") || "0");
-    const totalMB   = (totalSize / 1e6).toFixed(0);
-    console.log("[Pixory] Downloading model:", totalMB, "MB in chunks");
-
-    // Download in CHUNK_SIZE pieces — each chunk is GC'd after storing
+  // ── Chunked download if not cached ────────────────────────────────────────
+  if (!modelBuffer) {
+    step("Checking model…");
+    const head  = await fetch(MODEL_BASE + MODEL_FILE, { method: "HEAD" });
+    const total = parseInt(head.headers.get("content-length") || "0");
+    const CHUNK = 10 * 1024 * 1024;
     const chunks = [];
-    let downloaded = 0;
+    let done = 0;
 
-    while (downloaded < totalSize) {
-      const end  = Math.min(downloaded + CHUNK_SIZE - 1, totalSize - 1);
-      const resp = await fetch(MODEL_BASE + MODEL_FILE, {
-        headers: { "Range": `bytes=${downloaded}-${end}` }
-      });
+    step("Downloading AI model (0%)…");
+    while (done < total) {
+      const end  = Math.min(done + CHUNK - 1, total - 1);
+      const resp = await fetch(MODEL_BASE + MODEL_FILE,
+                               { headers: { Range: `bytes=${done}-${end}` } });
       if (!resp.ok && resp.status !== 206)
-        throw new Error(`Chunk fetch failed: HTTP ${resp.status}`);
-
-      const chunk = await resp.arrayBuffer();
-      chunks.push(new Uint8Array(chunk));
-      downloaded += chunk.byteLength;
-
-      const pct = Math.round(downloaded / totalSize * 100);
-      setLoading(`Downloading AI model: ${pct}% (${(downloaded/1e6).toFixed(0)}/${totalMB} MB)`);
+        throw new Error("Chunk " + resp.status);
+      const buf = await resp.arrayBuffer();
+      chunks.push(new Uint8Array(buf));
+      done += buf.byteLength;
+      step("Downloading: " + Math.round(done/total*100) + "% (" +
+           (done/1e6).toFixed(0) + "/" + (total/1e6).toFixed(0) + " MB)");
     }
 
-    // Assemble chunks into single buffer and cache in IndexedDB
-    step("Step 2: Saving to device cache…");
-    const total  = chunks.reduce((s, c) => s + c.length, 0);
-    const merged = new Uint8Array(total);
+    // Assemble
+    const merged = new Uint8Array(chunks.reduce((s,c)=>s+c.length,0));
     let pos = 0;
     for (const c of chunks) { merged.set(c, pos); pos += c.length; }
     modelBuffer = merged.buffer;
 
-    await idbPut(IDB_KEY, modelBuffer);
-    console.log("[Pixory] Model cached in IndexedDB ✅");
+    // Try to cache
+    try {
+      await new Promise((res, rej) => {
+        const req = indexedDB.open("pixory-model", 1);
+        req.onupgradeneeded = e => e.target.result.createObjectStore("m");
+        req.onsuccess = e => {
+          const tx = e.target.result.transaction("m","readwrite");
+          tx.objectStore("m").put(modelBuffer, IDB_KEY);
+          tx.oncomplete = res; tx.onerror = () => res();
+        };
+        req.onerror = res;
+      });
+      step("Model cached ✅");
+    } catch(e) { step("Cache save skipped"); }
   }
 
-  // ── Step 3: create ONNX session from buffer ────────────────────────────────
-  step("Step 3: Initialising ONNX…");
-  const { AutoTokenizer } = await import(
+  // ── Load tokenizer + create ONNX session ──────────────────────────────────
+  step("Loading tokenizer…");
+  const { AutoTokenizer, env } = await import(
     "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
   );
-
-  // Configure ONNX Runtime WASM paths
-  const { env } = await import(
-    "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
-  );
+  env.allowLocalModels = false;
   env.backends.onnx.wasm.wasmPaths =
     "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
-  env.allowLocalModels = false;
 
-  // Load tokenizer only (small — 2MB, no issue)
-  const tokenizer = await AutoTokenizer.from_pretrained(
-    "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/"
-  );
+  const tokenizer = await AutoTokenizer.from_pretrained(MODEL_BASE);
 
-  // Create ONNX session from our cached buffer
-  const ort = (await import(
-    "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"
-  )).default || (await import(
-    "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"
-  ));
+  step("Creating AI session…");
+  const ort = env.backends.onnx.InferenceSession
+    ? env.backends.onnx
+    : (await import("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js")).ort
+      || (await import("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"));
 
-  ort.env.wasm.wasmPaths =
-    "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+  const session = await ort.InferenceSession.create(modelBuffer,
+    { executionProviders: ["wasm"] });
 
-  const session = await ort.InferenceSession.create(modelBuffer, {
-    executionProviders: ["wasm"],
-  });
+  step("AI ready ✓");
 
-  console.log("[Pixory] ONNX session ready ✅");
-  step("Step 4: AI model ready ✓");
-
-  // ── Step 4: expose encode function ────────────────────────────────────────
   window._encodeText = async (query) => {
-    const inputs = tokenizer([query], { padding: true, truncation: true, max_length: 77 });
-    const ids  = inputs.input_ids.data;
-    const mask = inputs.attention_mask.data;
+    const inp  = tokenizer([query], { padding:true, truncation:true, max_length:77 });
+    const ids  = inp.input_ids.data;
+    const mask = inp.attention_mask.data;
     const n    = ids.length;
-
     const feeds = {
-      input_ids:      new ort.Tensor("int64", BigInt64Array.from(ids,  BigInt), [1, n]),
-      attention_mask: new ort.Tensor("int64", BigInt64Array.from(mask, BigInt), [1, n]),
+      input_ids:      new ort.Tensor("int64", BigInt64Array.from(ids,  BigInt), [1,n]),
+      attention_mask: new ort.Tensor("int64", BigInt64Array.from(mask, BigInt), [1,n]),
     };
     const out = await session.run(feeds);
-    const vec = Object.values(out).at(-1).data;  // last output = text embeds
-    const arr = new Float32Array(vec);
+    const vec = new Float32Array(Object.values(out).at(-1).data);
     let norm = 0;
-    for (let i = 0; i < arr.length; i++) norm += arr[i]*arr[i];
+    for (let i = 0; i < vec.length; i++) norm += vec[i]*vec[i];
     norm = Math.sqrt(norm);
-    for (let i = 0; i < arr.length; i++) arr[i] /= norm;
-    return arr;
+    for (let i = 0; i < vec.length; i++) vec[i] /= norm;
+    return vec;
   };
 }
 
