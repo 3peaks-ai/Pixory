@@ -1136,9 +1136,14 @@ async function init() {
     }
 
     setLoading(`Loading ${count} vectors…`);
-    await loadVectorsFromDB();
-    tgAlert("vectors loaded → state-ready");
+    try {
+      await loadVectorsFromDB();
+      tgAlert("loadVectorsFromDB done. cachedVecs: " + (cachedVecs||[]).length);
+    } catch(ve) {
+      tgAlert("loadVectorsFromDB FAIL: " + ve.message);
+    }
     setState("state-ready");
+    tgAlert("state-ready set ✅");
     document.getElementById("status-bar").textContent =
       `${count} photos indexed — try "beach sunset" or "family dinner"`;
   } catch (err) {
