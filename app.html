@@ -874,10 +874,6 @@ async function loadCLIP() {
       sub.textContent = "Check DevTools console for details. Error: " + msg.slice(0, 120);
     }
     // Don't throw — let the app remain open so user can see the error
-  })())];
-    setLoading("AI model ready ✓");
-  } catch (err) {
-    throw new Error("Model load failed: " + err.message);
   }
 }
 
