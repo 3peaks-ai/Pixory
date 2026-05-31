@@ -829,13 +829,37 @@ async function loadCLIP() {
   );
 
   try {
-    const { AutoTokenizer, CLIPTextModelWithProjection } = await import(
+    const { AutoTokenizer, CLIPTextModelWithProjection, env } = await import(
       "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
     );
+
+    // Fix silent hang in Telegram WebView:
+    // Transformers.js needs ONNX Runtime WASM files.
+    // Without explicit paths it looks next to app.html (GitHub Pages) → 404 → hangs.
+    // Point explicitly to jsDelivr CDN where the WASM files actually exist.
+    env.backends.onnx.wasm.wasmPaths =
+      "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+
+    // Disable local model cache check (can cause issues in Telegram WebView)
+    env.allowLocalModels = false;
+
+    console.log("[Pixory] Transformers.js env configured, loading model...");
     [clipTokenizer, clipTextModel] = await Promise.all([
       // L/14 text encoder from HuggingFace (one-time ~120 MB download)
     // Queries NEVER sent to server — all inference is client-side
     const MODEL_URL = "https://huggingface.co/3Peaks-AI/pixory-clip-text/resolve/main/";
+
+    // Quick connectivity test before loading the full model
+    try {
+      const testResp = await fetch(MODEL_URL + "config.json");
+      if (!testResp.ok) throw new Error("config.json returned " + testResp.status);
+      console.log("[Pixory] HuggingFace reachable ✅");
+    } catch (connErr) {
+      console.warn("[Pixory] HuggingFace unreachable:", connErr.message);
+      setLoading("❌ Cannot reach model server: " + connErr.message);
+      return;
+    }
+
     setLoading("Loading AI model (~120 MB, first time only)…");
     try {
       // quantized:false → looks for onnx/text_model.onnx
@@ -845,14 +869,18 @@ async function loadCLIP() {
         CLIPTextModelWithProjection.from_pretrained(MODEL_URL, { quantized: true }),
       ]);
       setLoading("AI model ready ✓");
-    } catch (e) {
-      console.error("[Pixory] Model load failed:", e);
-      // Show error visibly in the app
-      const loadEl = document.getElementById("loading-msg");
-      if (loadEl) loadEl.style.color = "#FF453A";
-      setLoading("Model load failed: " + e.message.slice(0,80));
-      throw e;
-    })())];
+  } catch (e) {
+    console.error("[Pixory] Model load failed:", e);
+    const msg = e?.message || String(e);
+    // Show error visibly — red text in the loading screen
+    setLoading("❌ " + msg.slice(0, 100));
+    const sub = document.getElementById("load-detail");
+    if (sub) {
+      sub.style.color = "#FF453A";
+      sub.textContent = "Check DevTools console for details. Error: " + msg.slice(0, 120);
+    }
+    // Don't throw — let the app remain open so user can see the error
+  })())];
     setLoading("AI model ready ✓");
   } catch (err) {
     throw new Error("Model load failed: " + err.message);
