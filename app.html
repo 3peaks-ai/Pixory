@@ -1106,12 +1106,15 @@ let cachedCC     = null;
 
 async function init() {
   try {
-    setLoading("Step 1: Opening local storage…");
+    setLoading("init: openDB…");
     db = await openDB();
-    await loadServeToken();   // token for serve.py requests
-    await loadShardBlob();    // lazy thumb Blob
-    _thumbOffsets = await loadThumbOffsets();  // offset table
-    setLoading("Step 2: Loading AI model…");
+    setLoading("init: loadServeToken…");
+    await loadServeToken();
+    setLoading("init: loadShardBlob…");
+    await loadShardBlob();
+    setLoading("init: loadThumbOffsets…");
+    _thumbOffsets = await loadThumbOffsets();
+    setLoading("init: loadCLIP…");
     await loadCLIP();
 
     const count = await countVectors(db);
