@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fetch Size Test</title>
+<style>
+body { background:#111; color:#fff; font-family:sans-serif;
+       padding:24px; margin:0; }
+h2   { margin-bottom:16px; }
+button { background:#0A84FF; color:#fff; border:none; border-radius:12px;
+         padding:14px 28px; font-size:16px; width:100%; margin-bottom:12px; }
+#log { margin-top:16px; font-size:13px; line-height:2; }
+</style>
+</head>
+<body>
+<h2>🔬 Fetch Size Test</h2>
+<button onclick="runTest()">Start Test</button>
+<div id="log">Tap Start to test fetch sizes…</div>
+
+<script>
+const BASE = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
+const log  = document.getElementById("log");
+
+function add(msg) {
+  log.innerHTML += "<div>" + msg + "</div>";
+  console.log(msg);
+}
+
+async function testFetch(mb) {
+  const url = BASE + "test_" + mb + "mb.bin";
+  add("Testing " + mb + " MB…");
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const buf = await r.arrayBuffer();
+    add("✅ " + mb + " MB: OK (" + (buf.byteLength/1e6).toFixed(1) + " MB received)");
+    return true;
+  } catch(e) {
+    add("❌ " + mb + " MB: FAIL — " + e.message);
+    return false;
+  }
+}
+
+async function runTest() {
+  log.innerHTML = "";
+  add("Starting…");
+  for (const mb of [10, 30, 50, 70, 100]) {
+    const ok = await testFetch(mb);
+    if (!ok) {
+      add("⛔ Limit is below " + mb + " MB");
+      return;
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  add("🎉 All passed! No limit found under 100 MB");
+}
+</script>
+</body>
+</html>
