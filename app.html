@@ -279,7 +279,7 @@ body {
            type="search" placeholder="Search your photos…"
            autocomplete="off" autocorrect="off" spellcheck="false">
   </div>
-  <div class="top-bar top-bar-browse" id="top-bar-browse" style="display:none">
+  <div class="top-bar top-bar-browse" id="top-bar-browse" style="">
     <span class="browse-title">All Photos</span>
     <span class="photo-count" id="browse-count"></span>
   </div>
@@ -1358,16 +1358,21 @@ searchInput.addEventListener("keydown", e => {
   }
 });
 
-searchInput.addEventListener("input", () => {
+function _onSearchChange() {
   clearTimeout(searchTimer);
   const q = searchInput.value.trim();
+  const dbg = document.getElementById("tg-debug");
+  if (dbg) dbg.textContent = `⌨️ "${q}" | vecs:${(cachedVecs||[]).length} model:${!!clipTextModel}`;
   if (!q) {
     grid.innerHTML = "";
     statusBar.textContent = `${cachedVecs?.length ?? 0} photos indexed`;
     return;
   }
-  searchTimer = setTimeout(() => runSearch(q), 300); // debounce 300ms
-});
+  searchTimer = setTimeout(() => runSearch(q), 300);
+}
+searchInput.addEventListener("input",  _onSearchChange);
+searchInput.addEventListener("keyup",  _onSearchChange);  // TG WebView fallback
+searchInput.addEventListener("change", _onSearchChange);  // extra fallback
 
 async function runSearch(query) {
   // Show searching state immediately
