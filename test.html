@@ -3,57 +3,61 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fetch Size Test</title>
+<title>Fetch Test</title>
 <style>
-body { background:#111; color:#fff; font-family:sans-serif;
-       padding:24px; margin:0; }
-h2   { margin-bottom:16px; }
-button { background:#0A84FF; color:#fff; border:none; border-radius:12px;
-         padding:14px 28px; font-size:16px; width:100%; margin-bottom:12px; }
-#log { margin-top:16px; font-size:13px; line-height:2; }
+body { background:#111; color:#fff; font-family:monospace;
+       padding:16px; margin:0; font-size:13px; }
+button { background:#0A84FF; color:#fff; border:none; border-radius:10px;
+         padding:12px 24px; font-size:15px; width:100%; margin:8px 0; }
+.ok  { color:#30D158; }
+.err { color:#FF453A; }
+.inf { color:#8E8E93; }
 </style>
 </head>
 <body>
-<h2>🔬 Fetch Size Test</h2>
-<button onclick="runTest()">Start Test</button>
-<div id="log">Tap Start to test fetch sizes…</div>
-
+<button onclick="runTest()">▶ Start Test</button>
+<div id="log"></div>
 <script>
 const BASE = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
 const log  = document.getElementById("log");
 
-function add(msg) {
-  log.innerHTML += "<div>" + msg + "</div>";
-  console.log(msg);
+function add(msg, cls) {
+  const d = document.createElement("div");
+  d.className = cls || "";
+  d.textContent = msg;
+  log.appendChild(d);
 }
 
-async function testFetch(mb) {
-  const url = BASE + "test_" + mb + "mb.bin";
-  add("Testing " + mb + " MB…");
+async function testFile(name, expectedMB) {
+  add("→ testing: " + name, "inf");
   try {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    const r = await fetch(BASE + name);
+    add("  HTTP status: " + r.status, r.ok ? "ok" : "err");
+    if (!r.ok) { add("  ❌ " + (expectedMB||"?") + "MB FAIL: HTTP " + r.status, "err"); return false; }
     const buf = await r.arrayBuffer();
-    add("✅ " + mb + " MB: OK (" + (buf.byteLength/1e6).toFixed(1) + " MB received)");
+    add("  ✅ " + (buf.byteLength/1e6).toFixed(1) + " MB received OK", "ok");
     return true;
   } catch(e) {
-    add("❌ " + mb + " MB: FAIL — " + e.message);
+    add("  ❌ FAIL: " + e.message, "err");
     return false;
   }
 }
 
 async function runTest() {
   log.innerHTML = "";
-  add("Starting…");
-  for (const mb of [10, 30, 50, 70, 100]) {
-    const ok = await testFetch(mb);
-    if (!ok) {
-      add("⛔ Limit is below " + mb + " MB");
-      return;
-    }
-    await new Promise(r => setTimeout(r, 500));
+  // First: test known-working small files
+  add("=== KNOWN FILES ===", "inf");
+  await testFile("config.json");
+  await testFile("tokenizer.json");
+  
+  // Then: test sizes
+  add("=== SIZE TEST ===", "inf");
+  add("(upload test files first: py make_test_files.py)", "inf");
+  for (const mb of [10, 30, 50, 70]) {
+    const ok = await testFile("test_" + mb + "mb.bin", mb);
+    if (!ok) { add("⛔ Limit below " + mb + "MB", "err"); break; }
   }
-  add("🎉 All passed! No limit found under 100 MB");
+  add("=== DONE ===", "inf");
 }
 </script>
 </body>
