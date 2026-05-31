@@ -824,12 +824,20 @@ async function loadCLIP() {
   // Solution: download in 10MB chunks, cache in IndexedDB, assemble locally.
   // Privacy: model runs entirely on device, queries never leave. ✅
 
+  const dbg = document.getElementById("tg-debug");
+  const step = (msg) => {
+    console.log("[Pixory]", msg);
+    if (dbg) dbg.textContent = msg;
+    setLoading(msg);
+  };
+
   const MODEL_BASE   = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/";
   const MODEL_FILE   = "onnx/text_model_quantized.onnx";
   const IDB_KEY      = "pixory-clip-l14-v1";
   const CHUNK_SIZE   = 10 * 1024 * 1024;  // 10 MB
 
   // ── Step 1: check IndexedDB cache ─────────────────────────────────────────
+  step("Step 1: Opening local cache…");
   async function idbGet(key) {
     return new Promise((res, rej) => {
       const req = indexedDB.open("pixory-model-cache", 1);
@@ -861,11 +869,11 @@ async function loadCLIP() {
   let modelBuffer = await idbGet(IDB_KEY);
 
   if (modelBuffer) {
-    setLoading("Loading AI model from cache…");
+    step("Loading from cache…");
     console.log("[Pixory] Model loaded from IndexedDB ✅", modelBuffer.byteLength);
   } else {
     // Get file size first
-    setLoading("Checking model size…");
+    step("Step 2: Checking model size…");
     const head = await fetch(MODEL_BASE + MODEL_FILE, { method: "HEAD" });
     const totalSize = parseInt(head.headers.get("content-length") || "0");
     const totalMB   = (totalSize / 1e6).toFixed(0);
@@ -892,7 +900,7 @@ async function loadCLIP() {
     }
 
     // Assemble chunks into single buffer and cache in IndexedDB
-    setLoading("Saving model to device cache…");
+    step("Step 2: Saving to device cache…");
     const total  = chunks.reduce((s, c) => s + c.length, 0);
     const merged = new Uint8Array(total);
     let pos = 0;
@@ -904,7 +912,7 @@ async function loadCLIP() {
   }
 
   // ── Step 3: create ONNX session from buffer ────────────────────────────────
-  setLoading("Initialising AI model…");
+  step("Step 3: Initialising ONNX…");
   const { AutoTokenizer } = await import(
     "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
   );
@@ -937,7 +945,7 @@ async function loadCLIP() {
   });
 
   console.log("[Pixory] ONNX session ready ✅");
-  setLoading("AI model ready ✓");
+  step("Step 4: AI model ready ✓");
 
   // ── Step 4: expose encode function ────────────────────────────────────────
   window._encodeText = async (query) => {
