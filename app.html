@@ -878,6 +878,10 @@ async function loadCLIP() {
 }
 
 async function textEmbed(query) {
+  if (!clipTokenizer || !clipTextModel) {
+    console.error("[Pixory] Model not loaded! clipTokenizer:", !!clipTokenizer, "clipTextModel:", !!clipTextModel);
+    throw new Error("AI model not loaded. Check loading screen for errors.");
+  }
   const inputs = clipTokenizer([query], { padding: true, truncation: true });
   const { text_embeds } = await clipTextModel(inputs);
   // L2-normalize to match open_clip image embeddings
@@ -1178,7 +1182,16 @@ function setGeoFilter(cc) {
   renderGeoChips();
   if (_currentTab === 'search') {
     const q = document.getElementById('search-input').value.trim();
-    if (q) runSearch(q); else renderResults([], '');
+    if (q) {
+      runSearch(q).catch(err => {
+        console.error("[Pixory] Search error:", err);
+        const grid = document.getElementById("photo-grid");
+        if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#FF453A">
+          Search error: ${err.message}<br>
+          <span style="font-size:12px;color:#636366">Model loaded: ${!!clipTextModel} | Vectors: ${(cachedVecs||[]).length}</span>
+        </div>`;
+      });
+    } else renderResults([], '');
   } else {
     startBrowse();
   }
@@ -1345,6 +1358,9 @@ searchInput.addEventListener("input", () => {
 });
 
 async function runSearch(query) {
+  // Show searching state immediately
+  const grid = document.getElementById("photo-grid");
+  if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
   if (!cachedVecs || !clipTextModel) return;
   statusBar.textContent = "Searching…";
 
