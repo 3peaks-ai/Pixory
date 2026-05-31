@@ -236,7 +236,7 @@ body {
   <div class="spinner"></div>
   <div class="loading-text" id="loading-msg">Loading AI model…</div>
   <div id="load-detail" style="color:#555;font-size:11px;margin-top:4px">
-    First launch: ~38 MB (cached forever)</div>
+    First launch: ~120 MB (cached forever)</div>
 </div>
 
 <!-- Lightbox overlay -->
@@ -833,9 +833,9 @@ async function loadCLIP() {
       "https://cdn.jsdelivr.net/npm/@xenova/transformers@2/dist/transformers.min.js"
     );
     [clipTokenizer, clipTextModel] = await Promise.all([
-      // Model hosted on GitHub — 38 MB quantized, client-side only
+      // Model hosted on GitHub — ~120 MB quantized, client-side only
     // Queries NEVER sent to any server (privacy by design)
-    const MODEL_BASE = "https://3peaks-ai.github.io/Pixory/models/clip-l14-text/";
+    const MODEL_BASE = "https://huggingface.co/3Peaks-AI/pixory-clip-text/resolve/main/";
     setLoading("Loading AI model (~38 MB, once)…");
     try {
       [clipTokenizer, clipTextModel] = await Promise.all([
