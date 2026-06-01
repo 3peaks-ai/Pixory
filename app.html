@@ -1218,7 +1218,8 @@ async function init() {
 
     setLoading("Analyzing photo collection…");
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
-    try { detectHubs(); } catch(e) { console.warn("[Pixory] hub detect failed:", e); }
+    try { computeWhitening(); } catch(e) { console.warn("[Pixory] whitening failed:", e); }
+    try { detectHubs();       } catch(e) { console.warn("[Pixory] hub detect failed:", e); }
 
     setState("state-ready");
     try {
@@ -1239,6 +1240,81 @@ async function loadVectorsFromDB() {
   cachedCC       = rows.map(r => r.cc || 0);
   // Preprocess: dehubbify all stored vectors once at load time
   _preprocessVecs();
+}
+
+
+// ── Prompt expansion for CLIP ──────────────────────────────────────────────
+// CLIP was trained on image captions. Short queries get expanded to caption style.
+// Tested expansion strategies for personal photo libraries.
+function expandQuery(q) {
+  const low = q.trim().toLowerCase();
+  // Already has context words — use as-is
+  if (low.split(/\s+/).length >= 4) return q;
+  // Short query → expand with CLIP-friendly prefix
+  return `a photo of ${q.trim()}`;
+}
+
+// ── Adaptive Whitening ─────────────────────────────────────────────────────
+// Per-dimension z-scoring of image vectors.
+// Removes the "universal photo direction" that dominates homogeneous libraries.
+// Works for any dataset diversity level — computed from THIS library's stats.
+//
+// Reference: covariance normalization improves cross-modal CLIP retrieval.
+// Both stored vectors AND query are whitened with the SAME parameters,
+// so cosine similarity in whitened space is well-defined.
+
+let _wMean = null;       // Float32Array(D): per-dimension mean of image vecs
+let _wStd  = null;       // Float32Array(D): per-dimension std of image vecs
+let _wVecs = null;       // Float32Array[]: pre-whitened + L2-normalized image vecs
+
+const WHITEN_EPS = 0.05; // Floor on std — prevents infinite amplification of
+                          // near-zero-variance dims; 0.05 = max 20x amplification
+
+function computeWhitening() {
+  if (!cachedVecs || cachedVecs.length < 5) { _wVecs = null; return; }
+  const N = cachedVecs.length;
+  const D = cachedVecs[0].length;
+  const t0 = performance.now();
+
+  // 1. Per-dimension mean
+  _wMean = new Float32Array(D);
+  for (const v of cachedVecs)
+    for (let d = 0; d < D; d++) _wMean[d] += v[d];
+  for (let d = 0; d < D; d++) _wMean[d] /= N;
+
+  // 2. Per-dimension std (with epsilon floor)
+  _wStd = new Float32Array(D).fill(0);
+  for (const v of cachedVecs)
+    for (let d = 0; d < D; d++) {
+      const diff = v[d] - _wMean[d];
+      _wStd[d] += diff * diff;
+    }
+  for (let d = 0; d < D; d++)
+    _wStd[d] = Math.max(Math.sqrt(_wStd[d] / N), WHITEN_EPS);
+
+  // 3. Pre-whiten all image vectors
+  _wVecs = cachedVecs.map(v => _applyWhitening(v));
+
+  // Diagnostics
+  const meanDot = _wVecs.reduce((s, v, i) => {
+    let d = 0; for (let j = 0; j < v.length; j++) d += v[j] * _wVecs[0][j];
+    return s + d;
+  }, 0) / N;
+  console.log(`[Pixory] Whitening done in ${Math.round(performance.now()-t0)}ms | ` +
+              `N=${N} D=${D} | mean_dot_after: ${meanDot.toFixed(3)} ` +
+              `(target: ~0 for well-centred vectors)`);
+}
+
+function _applyWhitening(v) {
+  const D = v.length;
+  const out = new Float32Array(D);
+  for (let d = 0; d < D; d++) out[d] = (v[d] - _wMean[d]) / _wStd[d];
+  // L2-normalize
+  let norm = 0;
+  for (const x of out) norm += x * x;
+  norm = Math.sqrt(norm);
+  if (norm > 1e-8) for (let d = 0; d < D; d++) out[d] /= norm;
+  return out;
 }
 
 // ── Hub detection (k-occurrence based) ─────────────────────────────────────
@@ -1602,8 +1678,12 @@ function renderBrowseBatch() {
 function makeThumbnailItem(r) {
   const item = document.createElement('div');
   // Raw L/14 scores: >0.22 = confident, 0.20-0.22 = plausible, <0.20 = dim
-  const confidence = r.score >= SCORE_CUTOFF ? 1.0 :
-                     r.score >= 0.12 ? 0.7 : 0.45;
+  // Opacity gradient: show all results, dim less-confident ones
+  // Don't hard-filter by threshold — CLIP scores on personal libraries are
+  // typically 0.18-0.25 and hard cutoffs lose relevant results
+  const confidence = r.score >= 0.23 ? 1.0 :
+                     r.score >= 0.21 ? 0.85 :
+                     r.score >= 0.19 ? 0.65 : 0.45;
   item.style.opacity = confidence;
   item.className = 'result-item';
   const name = r.path.split(/[/\\]/).pop();
@@ -1692,44 +1772,80 @@ searchInput.addEventListener("keyup",  _onSearchChange);  // TG WebView fallback
 searchInput.addEventListener("change", _onSearchChange);  // extra fallback
 
 async function runSearch(query) {
-  // Show searching state immediately
   const grid = document.getElementById("results-grid");
   if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
   if (!cachedVecs || !window._encodeText) return;
-  statusBar.textContent = "Searching…";
 
   try {
-    const t0  = performance.now();
-    const qv = await textEmbed(query);
+    const t0 = performance.now();
 
-    // RAW cosine similarity — no dehubbify.
-    // Dehubbify subtracts the mean image vector. For personal photo libraries
-    // where most photos share a subject (e.g. baby), the mean ≈ the subject,
-    // so subtracting it destroys the very signal we're searching for.
-    const top = topK(qv, cachedVecs, cachedPaths, cachedDates, 24);
+    // ── Prompt expansion + whitened encoding ────────────────────────────────
+    const expanded = expandQuery(query);
+    const qvRaw = await textEmbed(expanded);
+    // Apply adaptive whitening — removes "universal photo direction",
+    // amplifies what actually varies across THIS library.
+    const qv = (_wMean && _wVecs) ? _applyWhitening(qvRaw) : qvRaw;
+    const imageVecs = (_wVecs && _wVecs.length > 0) ? _wVecs : cachedVecs;
 
-    // Diagnostics
-    console.log('[Pixory]',
-      'q_dim:', qv.length,
-      'top5:', top.slice(0,5).map(r => (r.score*100).toFixed(1) + '% ' + r.path.split(/[\\/]/).pop()),
-      'mean_top:', (top.slice(0,5).reduce((s,r)=>s+r.score,0)/5*100).toFixed(1) + '%'
-    );
-    const ms  = Math.round(performance.now() - t0);
+    // ── Stage 1: whitened text→image ─────────────────────────────────────────
+    const stage1 = topK(qv, imageVecs, cachedPaths, cachedDates, 16);
 
-    // Debug: show top raw scores in console (remove after calibration)
-    const rawTop = cachedVecs
-      .map((v, i) => ({ s: cosineSimilarity(qv, v), p: cachedPaths[i] }))
-      .sort((a, b) => b.s - a.s).slice(0, 5);
-    console.log(`[Pixory] Top scores for "${query}":`,
-      rawTop.map(r => `${(r.s*100).toFixed(1)}% ${r.p.split(/[\/]/).pop()}`));
+    // ── Stage 2: visual query from top text matches ──────────────────────────
+    // Average whitened image vectors of top-8 → visual query in whitened space
+    const dim = imageVecs[0].length;
+    const visualQuery = new Float32Array(dim);
+    let totalW = 0;
+    for (const m of stage1.slice(0, 8)) {
+      const w = Math.max(0, m.score);
+      const v = imageVecs[m.idx];
+      for (let j = 0; j < dim; j++) visualQuery[j] += v[j] * w;
+      totalW += w;
+    }
+    if (totalW > 0) for (let i = 0; i < dim; i++) visualQuery[i] /= totalW;
+    let vNorm = 0;
+    for (const x of visualQuery) vNorm += x * x;
+    vNorm = Math.sqrt(vNorm);
+    if (vNorm > 1e-8) for (let i = 0; i < dim; i++) visualQuery[i] /= vNorm;
+
+    // ── Stage 3: blended scoring with hub penalty ────────────────────────────
+    const ALPHA = 0.25;
+    const results = imageVecs.map((v, i) => {
+      const tScore = cosineSimilarity(qv, v);
+      const iScore = cosineSimilarity(visualQuery, v);
+      const hubP   = _hubPenalty ? _hubPenalty[i] : 0;
+      return {
+        score: (ALPHA * tScore + (1 - ALPHA) * iScore) * (1 - hubP),
+        path:  cachedPaths[i],
+        date:  cachedDates ? cachedDates[i] : "",
+        idx:   i,
+      };
+    }).sort((a, b) => b.score - a.score);
+
+    const top = results.slice(0, 24);
+
+    // Ambiguity detection — helps user when library is too homogeneous for query
+    const top10Scores = top.slice(0, 10).map(r => r.score);
+    const scoreRange = top10Scores.length > 1
+      ? top10Scores[0] - top10Scores[top10Scores.length - 1] : 1;
+    const isAmbiguous = scoreRange < 0.015;
+
+    const ms = Math.round(performance.now() - t0);
+    console.log("[Pixory]", JSON.stringify(query), "→", JSON.stringify(expanded),
+      "| top5:", top.slice(0,5).map(r=>(r.score*100).toFixed(1)+"%"),
+      "| range:", (scoreRange*100).toFixed(2)+"% |", ms+"ms",
+      isAmbiguous ? "⚠️ ambiguous" : "✓");
 
     renderResults(top, query);
-    statusBar.textContent =
-      `${top.length} results for "${query}" — ${ms}ms`;
+    const hint = isAmbiguous ? ` — try more specific query` : "";
+    statusBar.textContent = `${top.length} results for "${query}"${hint}`;
+
   } catch (err) {
-    statusBar.textContent = `Search error: ${err.message}`;
+    console.error("[Pixory] Search error:", err);
+    if (statusBar) statusBar.textContent = "Search error: " + err.message;
+    if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:24px;color:#FF453A">Search error: ${err.message}</div>`;
   }
 }
+
 
 function renderResults(results, query) {
   grid.innerHTML = "";
