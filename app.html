@@ -1015,14 +1015,37 @@ async function loadCLIP() {
   }
   await step("AI ready ✓");
 
+  // Inspect what the ONNX model actually expects
+  const inputNames  = session.inputNames  || [];
+  const outputNames = session.outputNames || [];
+  console.log("[Pixory] ONNX inputs:", inputNames, "outputs:", outputNames);
+
   window._encodeText = async (query) => {
     const {inputIds, attMask} = tokenizer.tokenize(query);
     const n = inputIds.length;
-    const out = await session.run({
-      input_ids:      new ort.Tensor("int64", BigInt64Array.from(inputIds, BigInt), [1,n]),
-      attention_mask: new ort.Tensor("int64", BigInt64Array.from(attMask,  BigInt), [1,n]),
-    });
-    const vec = new Float32Array(Object.values(out).at(-1).data);
+
+    // Build feeds dictionary based on what the model actually wants
+    const feeds = {};
+    for (const name of inputNames) {
+      if (name === "input_ids" || name === "tokens" || name === "ids") {
+        feeds[name] = new ort.Tensor("int64", BigInt64Array.from(inputIds, BigInt), [1,n]);
+      } else if (name === "attention_mask" || name === "mask") {
+        feeds[name] = new ort.Tensor("int64", BigInt64Array.from(attMask,  BigInt), [1,n]);
+      } else {
+        // Unknown input — log and skip; ONNX will error if it's truly required
+        console.warn("[Pixory] Unknown ONNX input:", name);
+      }
+    }
+    // Fallback: if inputNames is empty (very old ORT), use legacy names
+    if (Object.keys(feeds).length === 0) {
+      feeds.input_ids = new ort.Tensor("int64", BigInt64Array.from(inputIds, BigInt), [1,n]);
+    }
+
+    const out = await session.run(feeds);
+    // Output: get the last named output (text_embeds or pooled_output)
+    const outKey = outputNames.length > 0 ? outputNames[outputNames.length-1] :
+                   Object.keys(out)[Object.keys(out).length-1];
+    const vec = new Float32Array(out[outKey].data);
     let norm=0; for(let i=0;i<vec.length;i++) norm+=vec[i]*vec[i];
     norm=Math.sqrt(norm);
     for(let i=0;i<vec.length;i++) vec[i]/=norm;
