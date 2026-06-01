@@ -253,6 +253,10 @@ body {
   <div class="spinner"></div>
   <div class="loading-text" id="loading-msg">Loading AI model…</div>
   <div id="load-detail" style="color:#555;font-size:11px;margin-top:4px">First launch: ~120 MB (cached forever)</div>
+  <div id="tg-debug" style="color:#555;font-size:10px;font-family:monospace;margin-top:2px"></div>
+</div>
+
+<!-- STATE: Import -->
 <div id="state-import">
   <div class="import-card">
     <h2>📁 Import your library</h2>
@@ -966,9 +970,21 @@ async function loadCLIP() {
 
   // ── Create ONNX session ────────────────────────────────────────────────────
   step("Creating ONNX session…");
-  const session = await ort.InferenceSession.create(modelBuffer,
-    { executionProviders: ["wasm"] });
-
+  let session;
+  try {
+    // Try WASM with SIMD first, fall back to basic WASM
+    session = await ort.InferenceSession.create(modelBuffer,
+      { executionProviders: ["wasm"], logSeverityLevel: 0 });
+  } catch(e1) {
+    step("SIMD failed (" + e1.message.slice(0,40) + "), trying fallback…");
+    try {
+      ort.env.wasm.simd = false;
+      session = await ort.InferenceSession.create(modelBuffer,
+        { executionProviders: ["wasm"] });
+    } catch(e2) {
+      throw new Error("ONNX init failed: " + e2.message);
+    }
+  }
   step("AI ready ✓");
 
   window._encodeText = async (query) => {
@@ -1033,18 +1049,11 @@ function setLoading(msg) {
 }
 
 function showError(msg) {
-  console.error("[Pixory error]", msg);
-  // Show error inside loading screen — stays visible
-  const dbg = document.getElementById("tg-debug");
-  if (dbg) { dbg.textContent = "❌ " + msg; dbg.style.color = "#FF453A"; }
-  setLoading("❌ " + msg.slice(0, 100));
+  console.error("[Pixory]", msg);
+  setState("state-loading");
+  setLoading("❌ " + msg.slice(0, 150));
   const sub = document.getElementById("load-detail");
-  if (sub) sub.textContent = "Tap to retry";
-  setState("state-loading");  // keep loading screen visible
-  // Also try state-error as fallback
-  try {
-    document.getElementById("error-msg").textContent = msg;
-  } catch(e) {}
+  if (sub) sub.textContent = "Tap retry or restart the app.";
 }
 
 function showImport() {
@@ -1096,9 +1105,10 @@ async function init() {
     } catch(ve) {
     }
     setState("state-ready");
-    try { startBrowse(); } catch(e) { }
-    document.getElementById("status-bar").textContent =
-      `${count} photos indexed — try "beach sunset" or "family dinner"`;
+    try {
+      startBrowse();
+      switchTab('browse');  // initialize tab state correctly
+    } catch(e) { console.error('browse init:', e); }
   } catch (err) {
     const detail = `${err.name}: ${err.message}`;
     showError(`Step failed: ${detail}`);
@@ -1319,7 +1329,7 @@ function setGeoFilter(cc) {
     if (q) {
       runSearch(q).catch(err => {
         console.error("[Pixory] Search error:", err);
-        const grid = document.getElementById("photo-grid");
+        const grid = document.getElementById("results-grid");
         if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#FF453A">
           Search error: ${err.message}<br>
           <span style="font-size:12px;color:#636366">Model loaded: ${!!clipTextModel} | Vectors: ${(cachedVecs||[]).length}</span>
@@ -1499,7 +1509,7 @@ searchInput.addEventListener("change", _onSearchChange);  // extra fallback
 
 async function runSearch(query) {
   // Show searching state immediately
-  const grid = document.getElementById("photo-grid");
+  const grid = document.getElementById("results-grid");
   if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
   if (!cachedVecs || !clipTextModel) return;
   statusBar.textContent = "Searching…";
