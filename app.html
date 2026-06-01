@@ -1015,40 +1015,100 @@ async function loadCLIP() {
   }
   await step("AI ready ✓");
 
-  // Inspect what the ONNX model actually expects
+  // Inspect what the ONNX model expects/returns
   const inputNames  = session.inputNames  || [];
   const outputNames = session.outputNames || [];
-  console.log("[Pixory] ONNX inputs:", inputNames, "outputs:", outputNames);
+  console.log("[Pixory] ONNX inputs:", inputNames);
+  console.log("[Pixory] ONNX outputs:", outputNames);
+
+  // Cache: which output name to use (decided on first run from actual dims)
+  let _bestOutputKey = null;
+  let _diagLogged = false;
 
   window._encodeText = async (query) => {
     const {inputIds, attMask} = tokenizer.tokenize(query);
     const n = inputIds.length;
 
-    // Build feeds dictionary based on what the model actually wants
+    // Build feeds based on what the model actually wants (skip unknown inputs)
     const feeds = {};
     for (const name of inputNames) {
       if (name === "input_ids" || name === "tokens" || name === "ids") {
         feeds[name] = new ort.Tensor("int64", BigInt64Array.from(inputIds, BigInt), [1,n]);
       } else if (name === "attention_mask" || name === "mask") {
-        feeds[name] = new ort.Tensor("int64", BigInt64Array.from(attMask,  BigInt), [1,n]);
-      } else {
-        // Unknown input — log and skip; ONNX will error if it's truly required
-        console.warn("[Pixory] Unknown ONNX input:", name);
+        feeds[name] = new ort.Tensor("int64", BigInt64Array.from(attMask, BigInt), [1,n]);
       }
     }
-    // Fallback: if inputNames is empty (very old ORT), use legacy names
+    // Fallback when inputNames is empty
     if (Object.keys(feeds).length === 0) {
       feeds.input_ids = new ort.Tensor("int64", BigInt64Array.from(inputIds, BigInt), [1,n]);
     }
 
     const out = await session.run(feeds);
-    // Output: get the last named output (text_embeds or pooled_output)
-    const outKey = outputNames.length > 0 ? outputNames[outputNames.length-1] :
-                   Object.keys(out)[Object.keys(out).length-1];
-    const vec = new Float32Array(out[outKey].data);
-    let norm=0; for(let i=0;i<vec.length;i++) norm+=vec[i]*vec[i];
-    norm=Math.sqrt(norm);
-    for(let i=0;i<vec.length;i++) vec[i]/=norm;
+
+    // Pick output with the right shape on FIRST call, then cache the name
+    if (!_bestOutputKey) {
+      // Priority: text_embeds > pooler_output > any 2D [1, D] output
+      // REJECT 3D outputs (like last_hidden_state which is [1, 77, 768])
+      const priority = ["text_embeds", "pooler_output", "last_hidden_state"];
+      let candidates = [];
+      for (const name of Object.keys(out)) {
+        const t = out[name];
+        const dims = t.dims || [];
+        const is2D = dims.length === 2;
+        candidates.push({name, dims, is2D, data: t.data});
+        console.log(`[Pixory] output "${name}" dims:`, dims, "len:", t.data.length);
+      }
+      // Prefer 2D outputs by priority name
+      for (const p of priority) {
+        if (candidates.find(c => c.name === p && c.is2D)) {
+          _bestOutputKey = p; break;
+        }
+      }
+      // Fallback: first 2D output
+      if (!_bestOutputKey) {
+        const c2d = candidates.find(c => c.is2D);
+        if (c2d) _bestOutputKey = c2d.name;
+      }
+      // Last resort: just use last output
+      if (!_bestOutputKey) _bestOutputKey = Object.keys(out).at(-1);
+      console.log("[Pixory] Selected output:", _bestOutputKey);
+    }
+
+    // Extract embedding from chosen output
+    let vec = new Float32Array(out[_bestOutputKey].data);
+
+    // If we ended up with a 3D last_hidden_state, extract EOS token embedding
+    // (the last non-pad token's hidden state — CLIP's actual text representation)
+    const dims = out[_bestOutputKey].dims || [];
+    if (dims.length === 3 && dims[2] === 768) {
+      // Find EOS position (last 1 in attention mask)
+      let eosPos = 0;
+      for (let i = n - 1; i >= 0; i--) if (attMask[i] === 1) { eosPos = i; break; }
+      const slice = new Float32Array(768);
+      const base = eosPos * 768;
+      for (let i = 0; i < 768; i++) slice[i] = vec[base + i];
+      vec = slice;
+      if (!_diagLogged) {
+        console.log("[Pixory] Extracted EOS token at pos", eosPos);
+        _diagLogged = true;
+      }
+    }
+
+    // L2 normalize for cosine similarity
+    let norm = 0;
+    for (let i = 0; i < vec.length; i++) norm += vec[i] * vec[i];
+    norm = Math.sqrt(norm);
+    if (norm > 1e-8) for (let i = 0; i < vec.length; i++) vec[i] /= norm;
+
+    // Diagnostic: log query vector stats once
+    if (!_diagLogged) {
+      console.log("[Pixory] Query vec dim:", vec.length,
+                  "min:", Math.min(...vec).toFixed(3),
+                  "max:", Math.max(...vec).toFixed(3),
+                  "first5:", Array.from(vec.slice(0,5)).map(x => x.toFixed(3)));
+      _diagLogged = true;
+    }
+
     return vec;
   };
 }
