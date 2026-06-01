@@ -49,7 +49,7 @@ body {
 #state-loading, #state-import, #state-ready, #state-error {
   display: none;
   flex-direction: column;
-  align-items: stretch;
+  align-items: center;
   justify-content: center;
   min-height: 100vh;
   padding: 24px;
@@ -1073,59 +1073,43 @@ let cachedThumbs = null;
 let cachedCC     = null;
 
 async function init() {
-  // Force dark theme regardless of Telegram user setting
+  // Force dark theme (Telegram may default to light)
   try {
     if (window.Telegram?.WebApp) {
       window.Telegram.WebApp.ready();
       window.Telegram.WebApp.expand();
-      if (window.Telegram.WebApp.setHeaderColor)
-        window.Telegram.WebApp.setHeaderColor('#0d1117');
-      if (window.Telegram.WebApp.setBackgroundColor)
-        window.Telegram.WebApp.setBackgroundColor('#0d1117');
+      window.Telegram.WebApp.setHeaderColor?.('#0d1117');
+      window.Telegram.WebApp.setBackgroundColor?.('#0d1117');
     }
   } catch(e) {}
+
   try {
-    // Quick fetch test to confirm network works inside app
-    try {
-      const r = await fetch("https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/config.json");
-    } catch(e) {
-    }
-    try { db = await openDB(); }
-    catch(e) { }
+    db = await openDB();
+    try { await loadServeToken();   } catch(e) {}
+    try { await loadShardBlob();    } catch(e) {}
+    try { _thumbOffsets = await loadThumbOffsets(); } catch(e) {}
 
-    try { await loadServeToken(); }
-    catch(e) { }
-
-    try { await loadShardBlob(); }
-    catch(e) { }
-
-    try { _thumbOffsets = await loadThumbOffsets(); }
-    catch(e) { }
     await loadCLIP();
 
     const count = await countVectors(db);
-
     if (count === 0) {
       setState("state-import");
       return;
     }
 
     setLoading(`Loading ${count} vectors…`);
-    try {
-      await loadVectorsFromDB();
-    } catch(ve) {
-    }
+    await loadVectorsFromDB();
+
     setState("state-ready");
     try {
       startBrowse();
-      switchTab('browse');  // initialize tab state correctly
+      switchTab('browse');
     } catch(e) { console.error('browse init:', e); }
+
   } catch (err) {
-    const detail = `${err.name}: ${err.message}`;
-    showError(`Step failed: ${detail}`);
+    showError(`Step failed: ${err.name}: ${err.message}`);
   }
 }
-
 async function loadVectorsFromDB() {
   const rows     = await getAllVectors(db);
   cachedVecs     = rows.map(r => new Float32Array(r.vector));
