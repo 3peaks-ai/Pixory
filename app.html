@@ -1128,17 +1128,23 @@ function cosineSimilarity(a, b) {
   return dot;
 }
 
-const SCORE_CUTOFF = 0.15;  // dehubbified L/14: relevant ≥ 0.15
+const SCORE_CUTOFF = 0.20;  // dehubbified L/14: relevant ≥ 0.15
 
 function topK(queryVec, vectors, paths, dates, k = 20) {
   if (!vectors || vectors.length === 0) return [];
 
-  const scored = vectors.map((v, i) => ({
-    score: cosineSimilarity(queryVec, v),
-    path:  paths[i],
-    date:  dates ? dates[i] : "",
-    idx:   i,
-  })).sort((a, b) => b.score - a.score);
+  const scored = vectors.map((v, i) => {
+    const raw = cosineSimilarity(queryVec, v);
+    const penalty = _hubPenalty ? _hubPenalty[i] : 0;
+    return {
+      score: raw * (1 - penalty),  // hub-adjusted score for ranking
+      raw:   raw,                  // original cosine similarity
+      penalty: penalty,
+      path:  paths[i],
+      date:  dates ? dates[i] : "",
+      idx:   i,
+    };
+  }).sort((a, b) => b.score - a.score);
 
   // Always return top results — no hard cutoff that hides everything.
   // Results below SCORE_CUTOFF shown with reduced opacity (handled in render).
@@ -1210,6 +1216,10 @@ async function init() {
     setLoading(`Loading ${count} vectors…`);
     await loadVectorsFromDB();
 
+    setLoading("Analyzing photo collection…");
+    await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+    try { detectHubs(); } catch(e) { console.warn("[Pixory] hub detect failed:", e); }
+
     setState("state-ready");
     try {
       startBrowse();
@@ -1231,7 +1241,76 @@ async function loadVectorsFromDB() {
   _preprocessVecs();
 }
 
-// ── Hubness reduction ─────────────────────────────────────────────────────────
+// ── Hub detection (k-occurrence based) ─────────────────────────────────────
+// A photo is a HUB if it appears in top-K nearest neighbors of many other photos.
+// Hubs are "generically similar to everything" (e.g. blurry, closet door, sky)
+// and get penalized at search time.
+//
+// IMPORTANT difference from global mean dehubbify:
+//   Mean dehubbify subtracts the "average" direction → if your library is
+//   mostly baby photos, this REMOVES the baby signal.
+//   K-occurrence specifically identifies photos that are nearest neighbors
+//   of MANY others, while leaving the dominant subject untouched.
+
+let _hubPenalty = null;  // Float32Array[N], 0..0.3 penalty multiplier per photo
+
+function detectHubs() {
+  if (!cachedVecs || cachedVecs.length < 30) {
+    _hubPenalty = null;
+    return;
+  }
+  const N = cachedVecs.length;
+  const K = Math.min(15, Math.floor(N / 10));   // k-NN size
+  const t0 = performance.now();
+  const counts = new Int32Array(N);
+
+  // For each photo, find its top-K neighbors and increment their counts
+  const sims = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const a = cachedVecs[i];
+    // pairwise cosine (vecs are L2-normalized already)
+    for (let j = 0; j < N; j++) {
+      if (i === j) { sims[j] = -2; continue; }
+      const b = cachedVecs[j];
+      let s = 0;
+      for (let k = 0; k < a.length; k++) s += a[k] * b[k];
+      sims[j] = s;
+    }
+    // Partial top-K: simple selection (avoids full sort)
+    const topIdx = new Int32Array(K);
+    const topScore = new Float32Array(K).fill(-3);
+    for (let j = 0; j < N; j++) {
+      const s = sims[j];
+      // Insert if better than the worst in topK
+      let worstIdx = 0;
+      for (let k = 1; k < K; k++) if (topScore[k] < topScore[worstIdx]) worstIdx = k;
+      if (s > topScore[worstIdx]) {
+        topScore[worstIdx] = s;
+        topIdx[worstIdx] = j;
+      }
+    }
+    for (let k = 0; k < K; k++) counts[topIdx[k]]++;
+  }
+
+  // Convert counts to penalty: normal photos have count ~= K, hubs have count >> K.
+  // Penalty: 0 for normal, up to 0.30 for severe hubs.
+  _hubPenalty = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const ratio = counts[i] / K;          // 1.0 = normal, >2 = hub-ish
+    _hubPenalty[i] = Math.min(0.30, Math.max(0, (ratio - 2) * 0.06));
+  }
+
+  // Log top hubs for diagnostics
+  const hubList = Array.from(counts).map((c, i) => ({c, i, p: _hubPenalty[i]}))
+    .sort((a, b) => b.c - a.c).slice(0, 5);
+  const ms = Math.round(performance.now() - t0);
+  console.log("[Pixory] Hub detection (" + ms + "ms): top 5 hubs (k-occurrence/penalty):");
+  hubList.forEach(h =>
+    console.log("  " + (cachedPaths[h.i] || "").split(/[\\/]/).pop() +
+                " — count " + h.c + " penalty " + (h.p*100).toFixed(0) + "%"));
+}
+
+// ── Legacy hubness reduction (kept for compatibility, NOT used in search) ── ─────────────────────────────────────────────────────────
 // Hub photos (e.g. closet door) have vectors near the mean of the space
 // and incorrectly appear relevant to every query.
 // Fix: project out the mean direction from ALL vectors (stored + query).
@@ -1621,25 +1700,20 @@ async function runSearch(query) {
 
   try {
     const t0  = performance.now();
-    const qv  = await textEmbed(query);
-    // Dehubbify query with SAME mean used for stored vectors → symmetric
-  if (!_dehubbed || !_meanVec) {
-    console.warn('[Pixory] _dehubbed not ready, running _preprocessVecs');
-    _preprocessVecs();
-  }
-  const qvH  = _dehubbify(qv);           // dehubbified query
-  const vecs = _dehubbed || cachedVecs;  // dehubbified stored vectors
+    const qv = await textEmbed(query);
 
-  // Diagnostics — scores should now be >0.15 for relevant results
-  if (vecs && vecs.length > 0) {
-    const allS = vecs.map(v => cosineSimilarity(qvH, v)).sort((a,b)=>b-a);
+    // RAW cosine similarity — no dehubbify.
+    // Dehubbify subtracts the mean image vector. For personal photo libraries
+    // where most photos share a subject (e.g. baby), the mean ≈ the subject,
+    // so subtracting it destroys the very signal we're searching for.
+    const top = topK(qv, cachedVecs, cachedPaths, cachedDates, 24);
+
+    // Diagnostics
     console.log('[Pixory]',
-      'q_dim:', qvH.length, 'using_dehubbed:', !!_dehubbed,
-      'top5:', allS.slice(0,5).map(s=>(s*100).toFixed(1)+'%'),
-      'above_cutoff:', allS.filter(s=>s>=SCORE_CUTOFF).length
+      'q_dim:', qv.length,
+      'top5:', top.slice(0,5).map(r => (r.score*100).toFixed(1) + '% ' + r.path.split(/[\\/]/).pop()),
+      'mean_top:', (top.slice(0,5).reduce((s,r)=>s+r.score,0)/5*100).toFixed(1) + '%'
     );
-  }
-  const top = topK(qvH, vecs, cachedPaths, cachedDates, 12);
     const ms  = Math.round(performance.now() - t0);
 
     // Debug: show top raw scores in console (remove after calibration)
