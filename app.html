@@ -40,8 +40,8 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  background: var(--tg-theme-bg-color, #0d1117);
-  color: var(--tg-theme-text-color, #e6edf3);
+  background: #0d1117;
+  color: #e6edf3;
   min-height: 100vh;
 }
 
@@ -108,7 +108,7 @@ body {
 #state-ready { justify-content: flex-start; padding: 0; align-items: stretch; }
 .search-bar {
   position: sticky; top: 0; z-index: 10;
-  background: var(--tg-theme-bg-color, #0d1117);
+  background: #0d1117;
   padding: 12px 16px;
   border-bottom: 1px solid #21262d;
   display: flex; gap: 8px; align-items: center;
@@ -201,7 +201,7 @@ body {
 /* ── Top bars ── */
 .top-bar {
   position: sticky; top: 0; z-index: 10;
-  background: var(--tg-theme-bg-color, #0d1117);
+  background: #0d1117;
   padding: 10px 16px 8px;
   border-bottom: 1px solid #21262d;
 }
@@ -246,7 +246,7 @@ body {
 .status-bar   { padding-bottom: 2px; }
 </style>
 </head>
-<body>
+<body style="background:#0d1117;color:#e6edf3">
 
 <!-- STATE: Loading model -->
 <div id="state-loading" class="active">
@@ -1073,6 +1073,17 @@ let cachedThumbs = null;
 let cachedCC     = null;
 
 async function init() {
+  // Force dark theme regardless of Telegram user setting
+  try {
+    if (window.Telegram?.WebApp) {
+      window.Telegram.WebApp.ready();
+      window.Telegram.WebApp.expand();
+      if (window.Telegram.WebApp.setHeaderColor)
+        window.Telegram.WebApp.setHeaderColor('#0d1117');
+      if (window.Telegram.WebApp.setBackgroundColor)
+        window.Telegram.WebApp.setBackgroundColor('#0d1117');
+    }
+  } catch(e) {}
   try {
     // Quick fetch test to confirm network works inside app
     try {
@@ -1507,11 +1518,11 @@ searchInput.addEventListener("input",  _onSearchChange);
 searchInput.addEventListener("keyup",  _onSearchChange);  // TG WebView fallback
 searchInput.addEventListener("change", _onSearchChange);  // extra fallback
 
-async function runSearch(query) {
+async async function runSearch(query) {
   // Show searching state immediately
   const grid = document.getElementById("results-grid");
   if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
-  if (!cachedVecs || !clipTextModel) return;
+  if (!cachedVecs || !window._encodeText) return;
   statusBar.textContent = "Searching…";
 
   try {
