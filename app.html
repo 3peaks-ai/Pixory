@@ -819,10 +819,22 @@ function _parseV3(buffer, view, dim, count) {
       offset += tlen;
     }
 
+    // ── labels (new in v3.1 — gracefully absent in older shards) ────────────
+    let labels = null;  // null = no label data (pre-3.1 shard)
+    if (offset < buffer.byteLength) {
+      const labelCount = view.getUint8(offset); offset += 1;
+      if (labelCount > 0 && offset + labelCount * 2 <= buffer.byteLength) {
+        labels = new Uint8Array(buffer, offset, labelCount * 2 + 0);
+        // Copy (can't hold view into detachable buffer across async boundaries)
+        labels = new Uint8Array(labels);
+        offset += labelCount * 2;
+      }
+    }
+
     const name = path.split(/[\/]/).pop() || path;
     const date = ts ? new Date(ts * 1000).toISOString().slice(0, 10) : "";
-    
-    records.push({ vector, ts, path, date, name, cc, city, thumbDataUrl });
+
+    records.push({ vector, ts, path, date, name, cc, city, thumbDataUrl, labels });
   }
   return records;
 }
@@ -1130,6 +1142,115 @@ function cosineSimilarity(a, b) {
 
 const SCORE_CUTOFF = 0.20;  // dehubbified L/14: relevant ≥ 0.15
 
+
+// ── Semantic label vocabulary (must match indexer.py LABEL_VOCAB) ─────────
+const LABEL_VOCAB = [
+  "baby","infant","toddler","child","boy","girl",                // 0-5
+  "adult person","elderly person","family",                      // 6-8
+  "group of people","face closeup portrait","selfie photo",      // 9-11
+  "pregnant woman",                                              // 12
+  "beach","ocean or sea","swimming pool",                        // 13-15
+  "park","garden","forest","mountains",                          // 16-19
+  "home interior","bedroom","kitchen","living room",             // 20-23
+  "bathroom","playground","restaurant","city street",            // 24-27
+  "snow landscape",                                              // 28
+  "sleeping","eating food","drinking","playing",                 // 29-32
+  "running","swimming","smiling","laughing","crying",            // 33-37
+  "hugging","birthday celebration","holiday celebration",        // 38-40
+  "cooking","reading","dancing",                                 // 41-43
+  "dog","cat","food meal","birthday cake","flowers",             // 44-48
+  "trees","sunset","night sky","snow","toys",                    // 49-53
+  "car vehicle","airplane","water",                              // 54-56
+  // 57-67: GARBAGE — these photos are penalised heavily
+  "screenshot of phone screen","computer screen",                // 57-58
+  "text document","graphic design poster",                       // 59-60
+  "meme internet image","product photo on white",               // 61-62
+  "receipt invoice bill","qr code barcode",                     // 63-64
+  "chart diagram graph","photo of a photo screen",              // 65-66
+  "random screenshot text",                                      // 67
+];
+const NEGATIVE_LABEL_IDS = new Set([57,58,59,60,61,62,63,64,65,66,67]);
+const LABEL_SCORE_SCALE = 200.0; // score_i8 = round(score * 200)
+
+/**
+ * Parse labels from binary: uint8 count + N×(uint8 id, uint8 score_i8)
+ * Returns array of [labelText, normalizedScore] pairs.
+ */
+function parseLabels(labelsUint8) {
+  if (!labelsUint8 || labelsUint8.length === 0) return [];
+  const count = labelsUint8[0];
+  const result = [];
+  for (let i = 0; i < count; i++) {
+    const offset = 1 + i * 2;
+    if (offset + 1 >= labelsUint8.length) break;
+    const id    = labelsUint8[offset];
+    const score = labelsUint8[offset + 1] / LABEL_SCORE_SCALE;
+    if (id < LABEL_VOCAB.length) result.push([LABEL_VOCAB[id], score, id]);
+  }
+  return result;
+}
+
+/**
+ * Parse a search query into keywords.
+ * "baby sleeping at beach" → ["baby","sleeping","beach"]
+ * Strips stopwords, normalises to lowercase.
+ */
+const STOPWORDS = new Set(["a","an","the","of","in","on","at","to","for","with",
+  "and","or","is","my","photo","picture","image","photos"]);
+function parseKeywords(query) {
+  return query.toLowerCase()
+    .replace(/[^a-zа-яёüöä\s]/gi, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 2 && !STOPWORDS.has(w));
+}
+
+/**
+ * iOS-style hybrid score:
+ *   - If garbage labels dominate → heavily penalise (never shows)
+ *   - If keywords match labels  → label score drives result (high precision)
+ *   - If no keyword match       → CLIP score * dampening (semantic fallback)
+ *
+ * Returns score in [0, 1].
+ */
+function hybridScore(clipScore, labels, keywords) {
+  if (!labels || labels.length === 0) {
+    // No label data (old index) — fall back to pure CLIP
+    return clipScore;
+  }
+
+  // Garbage detection: if top labels are negative → bury the photo
+  const isGarbage = labels.some(([, s, id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.45);
+  if (isGarbage) return clipScore * 0.05;  // ≈ invisible
+
+  if (!keywords || keywords.length === 0) return clipScore;
+
+  // Label matching: for each query keyword, check if any label matches
+  let matchScore = 0;
+  let matchCount = 0;
+  for (const kw of keywords) {
+    let best = 0;
+    for (const [lbl, s] of labels) {
+      // Substring match: "baby" matches "baby", "infant" doesn't match "bab"
+      if (lbl.includes(kw) || kw.includes(lbl.split(' ')[0])) {
+        best = Math.max(best, s);
+      }
+    }
+    if (best > 0) { matchScore += best; matchCount++; }
+  }
+
+  const coverage = matchCount / keywords.length;  // fraction of keywords matched
+  const avgLabelScore = matchScore / Math.max(1, matchCount);
+
+  if (matchCount === 0) {
+    // No label match at all — pure CLIP with slight dampening
+    // (still allows semantic search for concepts not in vocab)
+    return clipScore * 0.75;
+  }
+
+  // Blend: 35% CLIP + 65% label match (label match dominates for precision)
+  return 0.35 * clipScore + 0.65 * (coverage * avgLabelScore);
+}
+
 function topK(queryVec, vectors, paths, dates, k = 20) {
   if (!vectors || vectors.length === 0) return [];
 
@@ -1187,6 +1308,7 @@ let cachedPaths  = null;
 let cachedDates  = null;
 let cachedThumbs = null;
 let cachedCC     = null;
+let cachedLabels = null; // Array of Uint8Array (label binary per photo, may be null)
 
 async function init() {
   // Force dark theme (Telegram may default to light)
@@ -1218,7 +1340,6 @@ async function init() {
 
     setLoading("Analyzing photo collection…");
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
-    try { computeWhitening(); } catch(e) { console.warn("[Pixory] whitening failed:", e); }
     try { detectHubs();       } catch(e) { console.warn("[Pixory] hub detect failed:", e); }
 
     setState("state-ready");
@@ -1238,6 +1359,15 @@ async function loadVectorsFromDB() {
   cachedDates    = rows.map(r => r.date || "");
   cachedThumbs   = rows.map(r => r.thumbDataUrl || "");
   cachedCC       = rows.map(r => r.cc || 0);
+  cachedLabels   = rows.map(r => r.labels || null);  // null for pre-3.1 shards
+  const labelCount = cachedLabels.filter(Boolean).length;
+  if (labelCount > 0) {
+    const sample = parseLabels(cachedLabels[0]);
+    console.log("[Pixory] Labels loaded:", labelCount, "photos have labels. Sample:",
+      sample.map(([l,s]) => l + "(" + (s*100|0) + "%)").join(", "));
+  } else {
+    console.log("[Pixory] No label data (pre-3.1 shard) — re-index for best results");
+  }
   // Preprocess: dehubbify all stored vectors once at load time
   _preprocessVecs();
 }
@@ -1773,31 +1903,32 @@ searchInput.addEventListener("change", _onSearchChange);  // extra fallback
 
 async function runSearch(query) {
   const grid = document.getElementById("results-grid");
-  if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
   if (!cachedVecs || !window._encodeText) return;
+
+  const SPINNER = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
+  if (grid) grid.innerHTML = SPINNER;
 
   try {
     const t0 = performance.now();
 
-    // ── Prompt expansion + whitened encoding ────────────────────────────────
-    const expanded = expandQuery(query);
-    const qvRaw = await textEmbed(expanded);
-    // Apply adaptive whitening — removes "universal photo direction",
-    // amplifies what actually varies across THIS library.
-    const qv = (_wMean && _wVecs) ? _applyWhitening(qvRaw) : qvRaw;
-    const imageVecs = (_wVecs && _wVecs.length > 0) ? _wVecs : cachedVecs;
+    // ── Encode query ──────────────────────────────────────────────────────────
+    const expanded  = expandQuery(query);
+    const qv        = await textEmbed(expanded);
+    const keywords  = parseKeywords(query);  // for label matching
+    const hasLabels = cachedLabels && cachedLabels.some(Boolean);
 
-    // ── Stage 1: whitened text→image ─────────────────────────────────────────
-    const stage1 = topK(qv, imageVecs, cachedPaths, cachedDates, 16);
+    // ── Raw CLIP scores for all photos ────────────────────────────────────────
+    const dim = cachedVecs[0].length;
 
-    // ── Stage 2: visual query from top text matches ──────────────────────────
-    // Average whitened image vectors of top-8 → visual query in whitened space
-    const dim = imageVecs[0].length;
+    // Stage 1: text → top-16 candidates (raw CLIP)
+    const stage1 = topK(qv, _dehubbed || cachedVecs, cachedPaths, cachedDates, 16);
+
+    // Stage 2: visual query from top-8 (image-to-image refinement)
     const visualQuery = new Float32Array(dim);
     let totalW = 0;
     for (const m of stage1.slice(0, 8)) {
       const w = Math.max(0, m.score);
-      const v = imageVecs[m.idx];
+      const v = cachedVecs[m.idx];
       for (let j = 0; j < dim; j++) visualQuery[j] += v[j] * w;
       totalW += w;
     }
@@ -1807,78 +1938,87 @@ async function runSearch(query) {
     vNorm = Math.sqrt(vNorm);
     if (vNorm > 1e-8) for (let i = 0; i < dim; i++) visualQuery[i] /= vNorm;
 
-    // ── Stage 3: blended scoring with hub penalty ────────────────────────────
-    const ALPHA = 0.25;
-    const results = imageVecs.map((v, i) => {
-      const tScore = cosineSimilarity(qv, v);
-      const iScore = cosineSimilarity(visualQuery, v);
-      const hubP   = _hubPenalty ? _hubPenalty[i] : 0;
-      return {
-        score: (ALPHA * tScore + (1 - ALPHA) * iScore) * (1 - hubP),
-        path:  cachedPaths[i],
-        date:  cachedDates ? cachedDates[i] : "",
-        idx:   i,
-      };
-    }).sort((a, b) => b.score - a.score);
+    // Stage 3: score ALL photos with blended CLIP + hub penalty + label filter
+    const ALPHA = 0.30;  // text weight; 70% image-to-image for precision
+    // Hard cutoff: photos below this score are NEVER shown (like iOS)
+    // With labels: lower base OK since labels boost relevant photos strongly
+    // Without labels (old index): slightly higher to still filter garbage
+    const HARD_CUTOFF = hasLabels ? 0.05 : 0.10;
 
-    const top = results.slice(0, 24);
+    const allScored = cachedVecs.map((v, i) => {
+      const tScore  = cosineSimilarity(qv, v);
+      const iScore  = cosineSimilarity(visualQuery, v);
+      const hubP    = _hubPenalty ? _hubPenalty[i] : 0;
+      const clip    = (ALPHA * tScore + (1 - ALPHA) * iScore) * (1 - hubP);
 
-    // Ambiguity detection — helps user when library is too homogeneous for query
-    const top10Scores = top.slice(0, 10).map(r => r.score);
-    const scoreRange = top10Scores.length > 1
-      ? top10Scores[0] - top10Scores[top10Scores.length - 1] : 1;
-    const isAmbiguous = scoreRange < 0.015;
+      // iOS-style hybrid: label filter kills garbage, boosts precise matches
+      const labels  = hasLabels ? parseLabels(cachedLabels[i]) : null;
+      const final   = hybridScore(clip, labels, keywords);
+
+      return { score: final, clipScore: clip, path: cachedPaths[i],
+               date: cachedDates ? cachedDates[i] : "", idx: i };
+    });
+
+    // ── iOS-style filtering: only show photos that meet the threshold ─────────
+    const relevant = allScored
+      .filter(r => r.score >= HARD_CUTOFF)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 48);  // max 48 results (iOS shows ~20-30 for precise queries)
 
     const ms = Math.round(performance.now() - t0);
-    console.log("[Pixory]", JSON.stringify(query), "→", JSON.stringify(expanded),
-      "| top5:", top.slice(0,5).map(r=>(r.score*100).toFixed(1)+"%"),
-      "| range:", (scoreRange*100).toFixed(2)+"% |", ms+"ms",
-      isAmbiguous ? "⚠️ ambiguous" : "✓");
+    console.log("[Pixory]", JSON.stringify(query),
+      "→", JSON.stringify(expanded),
+      "| kw:", keywords,
+      "| results:", relevant.length, "/ shown from", allScored.length,
+      "| top5:", relevant.slice(0,5).map(r => (r.score*100).toFixed(1)+"%"),
+      "|", ms+"ms");
 
-    renderResults(top, query);
-    const hint = isAmbiguous ? ` — try more specific query` : "";
-    statusBar.textContent = `${top.length} results for "${query}"${hint}`;
+    renderResults(relevant, query);
 
   } catch (err) {
     console.error("[Pixory] Search error:", err);
-    if (statusBar) statusBar.textContent = "Search error: " + err.message;
-    if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:24px;color:#FF453A">Search error: ${err.message}</div>`;
+    if (grid) grid.innerHTML =
+      `<div style="grid-column:1/-1;padding:24px;color:#FF453A">Search error: ${err.message}</div>`;
   }
 }
 
 
 function renderResults(results, query) {
-  grid.innerHTML = "";
-  if (results.length === 0) {
-    const nv = (cachedVecs||[]).length;
-    const dim = nv > 0 ? (cachedVecs[0]||[]).length : 0;
-    if (query && nv === 0) {
-      grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#98989D">
-        No photos indexed.<br><br>Run <b>/sync</b> in Telegram to import your index.</div>`;
-    } else if (query) {
-      // Compute max score for debugging
-      const vecs = _dehubbed || cachedVecs || [];
-      const qvH = _meanVec ? _dehubbify(query._rawVec || new Float32Array(dim)) : new Float32Array(dim);
-      grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#98989D">
-        No results found for "<b>${query}</b>"<br>
-        <span style="font-size:12px;color:#636366">${nv} photos indexed (${dim}-dim) · Open DevTools console for score details</span></div>`;
-    }
+  const g = document.getElementById("results-grid");
+  if (!g) return;
+  g.innerHTML = "";
+
+  if ((cachedVecs||[]).length === 0) {
+    g.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#98989D">
+      No photos indexed.<br><br>Run <b>/sync</b> in Telegram to import your index.</div>`;
+    return;
   }
-  results.forEach(r => grid.appendChild(makeThumbnailItem(r)));
+
+  if (results.length === 0 && query) {
+    const hasLabels = cachedLabels && cachedLabels.some(Boolean);
+    const hint = hasLabels
+      ? "Try different keywords, or browse all photos below."
+      : "Re-index your photos to enable label-based search.";
+    g.innerHTML = `
+      <div style="grid-column:1/-1;padding:32px 16px;text-align:center">
+        <div style="font-size:32px;margin-bottom:8px">🔍</div>
+        <div style="color:#e0e0e0;font-size:16px;margin-bottom:6px">
+          No results for "<b>${query}</b>"</div>
+        <div style="color:#8E8E93;font-size:13px">${hint}</div>
+      </div>`;
+    if (statusBar) statusBar.textContent = \`No results for "\${query}"\`;
+    return;
+  }
+
+  if (statusBar) statusBar.textContent =
+    results.length > 0 ? \`\${results.length} results for "\${query}"\` : "";
+  results.forEach(r => g.appendChild(makeThumbnailItem(r)));
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-
-// Detect file:// protocol — fetch won't work, show clear instruction
 if (location.protocol === 'file:') {
   document.getElementById('loading-msg').textContent =
     '⚠️ Open via http://localhost, not file://';
-  document.querySelector('.loading-text + div').innerHTML =
-    '<div style="color:#e67e22;font-size:13px;max-width:280px;line-height:1.6">' +
-    'In terminal:<br><code style="background:#21262d;padding:4px 8px;border-radius:4px">' +
-    'python -m http.server 8765</code><br><br>' +
-    'Then open:<br><code style="background:#21262d;padding:4px 8px;border-radius:4px">' +
-    'http://localhost:8765/app.html</code></div>';
 } else {
   init();
 }
