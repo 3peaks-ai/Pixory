@@ -618,28 +618,33 @@ function buildThumbOffsets(buffer) {
   const magic   = String.fromCharCode(...new Uint8Array(buffer, 0, 4));
   if (magic !== 'PXRY') return {};
   const version = view.getUint8(4);
-  if (version !== 3) return {};  // only v3 has thumbs
+  if (version !== 3) return {};
 
-  const dim     = view.getUint16(5, true);  // actual dim: 512/768/1024
-  const count   = view.getUint32(7, true);
-  const offsets = {};
+  const dim       = view.getUint16(5, true);
+  const count     = view.getUint32(7, true);
+  const hasLabels = view.getUint8(14) & 0x01;  // must match _parseV3
+  const offsets   = {};
   let pos = 32;
 
   for (let i = 0; i < count; i++) {
-    pos += dim;                         // Int8 vector (dim bytes, not hardcoded 512)
+    pos += dim;
     const ts   = view.getUint32(pos, true); pos += 4;
     const cc   = view.getUint16(pos, true); pos += 2;
     const clen = view.getUint8(pos);        pos += 1;
-    pos += clen;                            // city
-    pos += 8;                               // phash (uint64)
+    pos += clen;
+    pos += 8;                               // phash
     const plen = view.getUint16(pos, true); pos += 2;
     const path = new TextDecoder().decode(new Uint8Array(buffer, pos, plen));
     pos += plen;
-
     const tlen = view.getUint32(pos, true); pos += 4;
     if (tlen > 0) {
       offsets[path] = { offset: pos, len: tlen };
       pos += tlen;
+    }
+    // skip labels if present (v3.1+)
+    if (hasLabels) {
+      const lc = view.getUint8(pos); pos += 1;
+      pos += lc * 2;
     }
   }
   return offsets;
