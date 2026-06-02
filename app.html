@@ -1910,6 +1910,56 @@ searchInput.addEventListener("input",  _onSearchChange);
 searchInput.addEventListener("keyup",  _onSearchChange);  // TG WebView fallback
 searchInput.addEventListener("change", _onSearchChange);  // extra fallback
 
+
+// Russian → English photo search vocabulary.
+// Replaces MyMemory API from Pixory 1 — no external calls, fully private.
+// ~100 most common personal photo search terms.
+const RU_EN = {
+  // People
+  "ребёнок":"baby","ребенок":"baby","малыш":"baby","малышка":"baby",
+  "дочь":"daughter","сын":"son","дочка":"daughter","сынок":"son",
+  "мама":"mom","папа":"dad","бабушка":"grandma","дедушка":"grandpa",
+  "семья":"family","дети":"children","ребята":"kids",
+  // Activities
+  "спит":"sleeping","спящий":"sleeping","спать":"sleeping",
+  "ест":"eating","кушает":"eating","еда":"food","кормление":"feeding",
+  "играет":"playing","играет":"playing","игра":"playing","игрушки":"toys",
+  "улыбается":"smiling","смеётся":"laughing","плачет":"crying",
+  "купается":"swimming","плавает":"swimming","ванна":"bath",
+  "ходит":"walking","бежит":"running","прыгает":"jumping",
+  "читает":"reading","рисует":"drawing","танцует":"dancing",
+  // Places
+  "море":"sea","пляж":"beach","вода":"water","океан":"ocean",
+  "парк":"park","сад":"garden","лес":"forest","горы":"mountains",
+  "дом":"home","дома":"home","комната":"room","спальня":"bedroom",
+  "кухня":"kitchen","улица":"street","город":"city",
+  "бассейн":"pool","природа":"nature","снег":"snow",
+  // Events
+  "день рождения":"birthday","праздник":"celebration","новый год":"new year",
+  "торт":"cake","свечи":"candles","подарок":"gift","подарки":"gifts",
+  "первый раз":"first time","первые шаги":"first steps",
+  // Descriptors
+  "милый":"cute","красивый":"beautiful","смешной":"funny",
+  "маленький":"little","большой":"big","новый":"new",
+  "утро":"morning","вечер":"evening","ночь":"night","лето":"summer",
+  "зима":"winter","осень":"autumn","весна":"spring",
+  // Objects
+  "собака":"dog","кошка":"cat","животное":"animal",
+  "машина":"car","самолёт":"airplane","велосипед":"bicycle",
+  "цветы":"flowers","дерево":"tree","трава":"grass",
+};
+
+function translateQuery(q) {
+  // Replace Russian words with English equivalents
+  let result = q.toLowerCase();
+  // Sort by length descending to match longer phrases first
+  const entries = Object.entries(RU_EN).sort((a,b) => b[0].length - a[0].length);
+  for (const [ru, en] of entries) {
+    result = result.replace(new RegExp(ru, 'g'), en);
+  }
+  return result;
+}
+
 async function runSearch(query) {
   const grid = document.getElementById("results-grid");
   if (!cachedVecs || !window._encodeText) return;
@@ -1917,82 +1967,83 @@ async function runSearch(query) {
 
   try {
     const t0 = performance.now();
-    const dim = cachedVecs[0].length;
 
-    // ── Encode query (raw — no dehubbify) ─────────────────────────────────────
-    // IMPORTANT: dehubbify subtracts the library mean.
-    // For personal photo libraries (e.g. all baby photos), mean ≈ subject.
-    // dehubbify("baby") ≈ "baby" − "baby" ≈ zero → signal destroyed.
-    // We use RAW text embeddings throughout.
-    const qv = await textEmbed(expandQuery(query));
+    // ── Translation: RU→EN (Pixory 1 best practice, now private/offline) ────
+    const translated = translateQuery(query);
+    const expanded   = expandQuery(translated);  // "a photo of ..."
+    const kws        = parseKeywords(translated); // ["baby","sleeping"]
 
-    // ── Stage 1: text → image, top-N candidates ───────────────────────────────
-    // Text-image cosine is weak (~1% range for personal libraries)
-    // but directionally correct — top matches ARE relevant photos.
-    const N1 = Math.min(12, Math.ceil(cachedVecs.length * 0.05));
-    const sims1 = cachedVecs.map((v, i) => ({
-      s: cosineSimilarity(qv, v),
-      i,
-    })).sort((a, b) => b.s - a.s).slice(0, N1);
+    const qv        = await textEmbed(expanded);
+    const hasLabels = !!(cachedLabels && cachedLabels.some(Boolean));
 
-    // ── Stage 2: build visual query ───────────────────────────────────────────
-    // Average the image vectors of Stage-1 matches, weighted by score.
-    // This gives a query vector IN image space — same space as all stored vecs.
-    // Image-image cosine has ~5-8% range → much stronger discrimination.
-    const visualQuery = new Float32Array(dim);
-    let totalW = 0;
-    for (const m of sims1) {
-      const w = Math.max(0, m.s);
-      const v = cachedVecs[m.i];
-      for (let j = 0; j < dim; j++) visualQuery[j] += v[j] * w;
-      totalW += w;
-    }
-    if (totalW > 1e-8) {
-      for (let i = 0; i < dim; i++) visualQuery[i] /= totalW;
-    }
-    // L2-normalise visual query
-    let vNorm = 0;
-    for (const x of visualQuery) vNorm += x * x;
-    vNorm = Math.sqrt(vNorm);
-    if (vNorm > 1e-8) for (let i = 0; i < dim; i++) visualQuery[i] /= vNorm;
-
-    // ── Stage 3: full rerank with image-image + hub penalty ───────────────────
-    // ALPHA: small text weight keeps query semantics; 1-ALPHA image-image
-    // provides the discrimination power. Hub penalty suppresses screenshots
-    // and blurry generic photos that appear in everyone's neighborhood.
-    const ALPHA = 0.15;
+    // ── Score every photo ────────────────────────────────────────────────────
     const scored = cachedVecs.map((v, i) => {
-      const tScore  = cosineSimilarity(qv, v);           // text→image (weak)
-      const iScore  = cosineSimilarity(visualQuery, v);  // image→image (strong)
-      const hubP    = _hubPenalty ? _hubPenalty[i] : 0;
-      const isPng   = cachedPaths[i]?.toLowerCase().endsWith('.png'); // screenshots
-      const rawScore = (ALPHA * tScore + (1 - ALPHA) * iScore);
-      return {
-        score: isPng ? 0 : rawScore * (1 - hubP),
-        path:  cachedPaths[i],
-        date:  cachedDates ? cachedDates[i] : "",
-        idx:   i,
-      };
-    }).sort((a, b) => b.score - a.score);
+      const path = cachedPaths[i] || '';
 
-    const top = scored.slice(0, 24);
-    const ms  = Math.round(performance.now() - t0);
+      // Hard-exclude PNG (iPhone screenshots are always PNG)
+      if (path.toLowerCase().endsWith('.png'))
+        return { score: -1, idx: i, path, date: '' };
 
-    // Diagnostic log
-    const top5names = top.slice(0,5).map(r =>
-      (r.score*100).toFixed(1) + "% " + (r.path.split(/[/\\]/).pop() || r.path));
-    console.log("[Pixory]", JSON.stringify(query),
-      "| stage1 top:", sims1.slice(0,3).map(m=>(m.s*100).toFixed(1)+"%"),
-      "| final top5:", top5names,
-      "| hubs:", _hubPenalty ? "active" : "none",
-      "|", ms + "ms");
+      const clipScore = cosineSimilarity(qv, v);
+      const hubP      = _hubPenalty ? _hubPenalty[i] : 0;
+      const clip      = clipScore * (1 - hubP);
+
+      // ── Label scoring (iOS-style: keyword → label filter) ─────────────────
+      let labelScore = 0;
+      if (hasLabels && cachedLabels[i] && kws.length > 0) {
+        const labels = parseLabels(cachedLabels[i]);
+        const isGarbage = labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.45);
+        if (isGarbage) return { score: -1, idx: i, path, date: '' };
+
+        let matched = 0;
+        for (const kw of kws) {
+          let best = 0;
+          for (const [lbl, s] of labels) {
+            if (lbl.includes(kw) || kw.includes(lbl.split(' ')[0])) best = Math.max(best, s);
+          }
+          labelScore += best;
+          if (best > 0) matched++;
+        }
+        labelScore /= kws.length;
+
+        // Suppress photos with NO label match (unless CLIP score is exceptional)
+        if (matched === 0 && clip < 0.215)
+          return { score: clip * 0.3, idx: i, path, date: cachedDates?.[i] ?? '' };
+      }
+
+      const final = hasLabels && kws.length > 0
+        ? 0.30 * clip + 0.70 * labelScore
+        : clip;
+
+      return { score: final, idx: i, path, date: cachedDates?.[i] ?? '' };
+    }).filter(r => r.score > 0).sort((a, b) => b.score - a.score);
+
+    // ── Cliff detection (Pixory 1 best practice) ─────────────────────────────
+    // If score drops more than 40% from previous → stop (tail is irrelevant)
+    const CLIFF_RATIO = 0.60;  // score < prev * 0.60 → cliff
+    const MIN_RESULTS = 5;     // always show at least 5 results
+    const MAX_RESULTS = 24;
+    const top = [];
+    for (let i = 0; i < Math.min(scored.length, MAX_RESULTS); i++) {
+      if (top.length >= MIN_RESULTS && scored[i].score < top[top.length-1].score * CLIFF_RATIO)
+        break;
+      top.push(scored[i]);
+    }
+
+    const ms = Math.round(performance.now() - t0);
+    console.log('[Pixory]', JSON.stringify(query),
+      translated !== query ? `→ EN: "${translated}"` : '',
+      '| labels:', hasLabels, '| kws:', kws,
+      '| top5:', top.slice(0,5).map(r => (r.score*100|0)+'% '+r.path.split(/[/\\]/).pop()),
+      '| cliff at', top.length, '/', scored.length, '|', ms+'ms');
 
     renderResults(top, query);
-    if (statusBar) statusBar.textContent =
-      `${top.length} results for "${query}" — ${ms}ms`;
+    if (statusBar) statusBar.textContent = top.length > 0
+      ? `${top.length} results for "${query}" — ${ms}ms`
+      : `No results for "${query}"`;
 
   } catch(err) {
-    console.error("[Pixory] Search error:", err);
+    console.error('[Pixory] Search error:', err);
     if (grid) grid.innerHTML =
       `<div style="grid-column:1/-1;padding:24px;color:#FF453A">Search error: ${err.message}</div>`;
   }
