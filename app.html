@@ -1634,6 +1634,10 @@ document.getElementById("file-input").addEventListener("change", async e => {
     setLoading("Storing " + count + " vectors…");
     await clearAndStore(db, records);
     await loadVectorsFromDB();
+    // Run hub detection so screenshots/hubs are penalised immediately
+    setLoading("Analysing photo collection…");
+    await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+    try { detectHubs(); } catch(e) {}
     const total = cachedVecs ? cachedVecs.length : count;
 
     setState("state-ready");
@@ -1913,71 +1917,79 @@ async function runSearch(query) {
 
   try {
     const t0 = performance.now();
+    const dim = cachedVecs[0].length;
 
-    // Encode + dehubbify query (subtract mean vector — same as iOS "remove generic photo direction")
-    const expanded = expandQuery(query);
-    const qvRaw = await textEmbed(expanded);
-    const qv = _meanVec ? _dehubbify(qvRaw) : qvRaw;
+    // ── Encode query (raw — no dehubbify) ─────────────────────────────────────
+    // IMPORTANT: dehubbify subtracts the library mean.
+    // For personal photo libraries (e.g. all baby photos), mean ≈ subject.
+    // dehubbify("baby") ≈ "baby" − "baby" ≈ zero → signal destroyed.
+    // We use RAW text embeddings throughout.
+    const qv = await textEmbed(expandQuery(query));
 
-    // Score every photo: dehubbify image vec + hub penalty
-    const allScored = cachedVecs.map((v, i) => {
-      const dv  = _meanVec ? _dehubbify(v) : v;
-      const raw = cosineSimilarity(qv, dv);
-      const hub = _hubPenalty ? _hubPenalty[i] : 0;
-      return { score: raw * (1 - hub), path: cachedPaths[i],
-               date: cachedDates ? cachedDates[i] : "", idx: i };
-    });
+    // ── Stage 1: text → image, top-N candidates ───────────────────────────────
+    // Text-image cosine is weak (~1% range for personal libraries)
+    // but directionally correct — top matches ARE relevant photos.
+    const N1 = Math.min(12, Math.ceil(cachedVecs.length * 0.05));
+    const sims1 = cachedVecs.map((v, i) => ({
+      s: cosineSimilarity(qv, v),
+      i,
+    })).sort((a, b) => b.s - a.s).slice(0, N1);
 
-    // Hard exclude: PNG = screenshot (before label system is available)
-    const hasLabels  = cachedLabels && cachedLabels.some(Boolean);
-    const keywords   = parseKeywords(query);
-
-    const results = allScored
-      .filter((r, i) => {
-        // Always exclude PNG files (screenshots on iPhone)
-        if (cachedPaths[i] && cachedPaths[i].toLowerCase().endsWith('.png')) return false;
-        // With labels: also apply garbage label filter
-        if (hasLabels && cachedLabels[i]) {
-          const labels = parseLabels(cachedLabels[i]);
-          const isGarbage = labels.some(([, s, id]) =>
-            NEGATIVE_LABEL_IDS.has(id) && s > 0.45);
-          if (isGarbage) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => b.score - a.score);
-
-    // With labels: boost photos whose labels match query keywords
-    // Without labels: pure dehubbified cosine ranking
-    let ranked;
-    if (hasLabels && keywords.length > 0) {
-      ranked = results.map(r => {
-        const labels = cachedLabels[r.idx] ? parseLabels(cachedLabels[r.idx]) : [];
-        let labelBoost = 0;
-        for (const kw of keywords) {
-          for (const [lbl, s] of labels) {
-            if (lbl.includes(kw) || kw.includes(lbl.split(' ')[0])) {
-              labelBoost = Math.max(labelBoost, s);
-            }
-          }
-        }
-        return { ...r, score: labelBoost > 0
-          ? 0.5 * r.score + 0.5 * labelBoost
-          : r.score * 0.85 };  // slight penalty for no label match
-      }).sort((a, b) => b.score - a.score);
-    } else {
-      ranked = results;
+    // ── Stage 2: build visual query ───────────────────────────────────────────
+    // Average the image vectors of Stage-1 matches, weighted by score.
+    // This gives a query vector IN image space — same space as all stored vecs.
+    // Image-image cosine has ~5-8% range → much stronger discrimination.
+    const visualQuery = new Float32Array(dim);
+    let totalW = 0;
+    for (const m of sims1) {
+      const w = Math.max(0, m.s);
+      const v = cachedVecs[m.i];
+      for (let j = 0; j < dim; j++) visualQuery[j] += v[j] * w;
+      totalW += w;
     }
+    if (totalW > 1e-8) {
+      for (let i = 0; i < dim; i++) visualQuery[i] /= totalW;
+    }
+    // L2-normalise visual query
+    let vNorm = 0;
+    for (const x of visualQuery) vNorm += x * x;
+    vNorm = Math.sqrt(vNorm);
+    if (vNorm > 1e-8) for (let i = 0; i < dim; i++) visualQuery[i] /= vNorm;
 
-    const top = ranked.slice(0, 24);
+    // ── Stage 3: full rerank with image-image + hub penalty ───────────────────
+    // ALPHA: small text weight keeps query semantics; 1-ALPHA image-image
+    // provides the discrimination power. Hub penalty suppresses screenshots
+    // and blurry generic photos that appear in everyone's neighborhood.
+    const ALPHA = 0.15;
+    const scored = cachedVecs.map((v, i) => {
+      const tScore  = cosineSimilarity(qv, v);           // text→image (weak)
+      const iScore  = cosineSimilarity(visualQuery, v);  // image→image (strong)
+      const hubP    = _hubPenalty ? _hubPenalty[i] : 0;
+      const isPng   = cachedPaths[i]?.toLowerCase().endsWith('.png'); // screenshots
+      const rawScore = (ALPHA * tScore + (1 - ALPHA) * iScore);
+      return {
+        score: isPng ? 0 : rawScore * (1 - hubP),
+        path:  cachedPaths[i],
+        date:  cachedDates ? cachedDates[i] : "",
+        idx:   i,
+      };
+    }).sort((a, b) => b.score - a.score);
+
+    const top = scored.slice(0, 24);
     const ms  = Math.round(performance.now() - t0);
 
-    console.log("[Pixory]", JSON.stringify(query), "→", JSON.stringify(expanded),
-      "| dehubbify:", !!_meanVec, "| labels:", hasLabels,
-      "| top5:", top.slice(0,5).map(r => (r.score*100).toFixed(1)+"%"),
-      "|", top.length, "results |", ms+"ms");
+    // Diagnostic log
+    const top5names = top.slice(0,5).map(r =>
+      (r.score*100).toFixed(1) + "% " + (r.path.split(/[/\\]/).pop() || r.path));
+    console.log("[Pixory]", JSON.stringify(query),
+      "| stage1 top:", sims1.slice(0,3).map(m=>(m.s*100).toFixed(1)+"%"),
+      "| final top5:", top5names,
+      "| hubs:", _hubPenalty ? "active" : "none",
+      "|", ms + "ms");
 
     renderResults(top, query);
+    if (statusBar) statusBar.textContent =
+      `${top.length} results for "${query}" — ${ms}ms`;
 
   } catch(err) {
     console.error("[Pixory] Search error:", err);
