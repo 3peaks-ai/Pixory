@@ -770,7 +770,8 @@ function _parseV3(buffer, view, dim, count) {
   // Header: 32 bytes total
   // [0:4] magic, [4] version, [5:7] dim, [7:11] count,
   // [11:13] year, [13] quant, [14:32] reserved
-  const quant = view.getUint8(13);
+  const quant    = view.getUint8(13);
+  const hasLabels = view.getUint8(14) & 0x01;  // bit0: labels present in records
   if (quant !== 1) throw new Error(`Unsupported quantization: ${quant}`);
 
   const records = [];
@@ -819,14 +820,13 @@ function _parseV3(buffer, view, dim, count) {
       offset += tlen;
     }
 
-    // ── labels (new in v3.1 — gracefully absent in older shards) ────────────
-    let labels = null;  // null = no label data (pre-3.1 shard)
-    if (offset < buffer.byteLength) {
+    // ── labels (v3.1+, only if header flag bit0=1) ──────────────────────────
+    let labels = null;
+    if (hasLabels) {
       const labelCount = view.getUint8(offset); offset += 1;
-      if (labelCount > 0 && offset + labelCount * 2 <= buffer.byteLength) {
-        labels = new Uint8Array(buffer, offset, labelCount * 2 + 0);
-        // Copy (can't hold view into detachable buffer across async boundaries)
-        labels = new Uint8Array(labels);
+      if (labelCount > 0) {
+        const labelsRaw = new Uint8Array(buffer, offset, labelCount * 2);
+        labels = new Uint8Array(labelsRaw);  // copy — don't hold view into buffer
         offset += labelCount * 2;
       }
     }
