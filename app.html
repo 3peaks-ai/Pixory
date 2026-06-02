@@ -1966,76 +1966,76 @@ async function runSearch(query) {
   if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
 
   try {
-    const t0 = performance.now();
+    const t0  = performance.now();
+    const qv  = await textEmbed(expandQuery(query));
+    const kws = parseKeywords(translateQuery(query));
 
-    // ── Translation: RU→EN (Pixory 1 best practice, now private/offline) ────
-    const translated = translateQuery(query);
-    const expanded   = expandQuery(translated);  // "a photo of ..."
-    const kws        = parseKeywords(translated); // ["baby","sleeping"]
+    // hasLabels = true only if at least one photo has ≥1 actual label
+    // (Uint8Array([0]) is truthy but means 0 labels — don't treat as labeled)
+    const hasLabels = !!(cachedLabels &&
+      cachedLabels.some(l => l && l.length > 1 && l[0] > 0));
 
-    const qv        = await textEmbed(expanded);
-    const hasLabels = !!(cachedLabels && cachedLabels.some(Boolean));
-
-    // ── Score every photo ────────────────────────────────────────────────────
     const scored = cachedVecs.map((v, i) => {
       const path = cachedPaths[i] || '';
-
-      // Hard-exclude PNG (iPhone screenshots are always PNG)
       if (path.toLowerCase().endsWith('.png'))
         return { score: -1, idx: i, path, date: '' };
 
-      const clipScore = cosineSimilarity(qv, v);
-      const hubP      = _hubPenalty ? _hubPenalty[i] : 0;
-      const clip      = clipScore * (1 - hubP);
+      const rawClip = cosineSimilarity(qv, v);
+      const hubP    = _hubPenalty ? _hubPenalty[i] : 0;
+      const clip    = rawClip * (1 - hubP);
 
-      // ── Label scoring (iOS-style: keyword → label filter) ─────────────────
-      let labelScore = 0;
-      if (hasLabels && cachedLabels[i] && kws.length > 0) {
+      // Label scoring — only when photo actually HAS labels
+      if (hasLabels && kws.length > 0 && cachedLabels[i]) {
         const labels = parseLabels(cachedLabels[i]);
-        const isGarbage = labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.45);
-        if (isGarbage) return { score: -1, idx: i, path, date: '' };
 
-        let matched = 0;
-        for (const kw of kws) {
-          let best = 0;
-          for (const [lbl, s] of labels) {
-            if (lbl.includes(kw) || kw.includes(lbl.split(' ')[0])) best = Math.max(best, s);
+        if (labels.length > 0) {
+          // Garbage filter
+          if (labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.45))
+            return { score: -1, idx: i, path, date: '' };
+
+          // Keyword match
+          let matched = 0, labelScore = 0;
+          for (const kw of kws) {
+            let best = 0;
+            for (const [lbl, s] of labels) {
+              if (lbl.includes(kw) || kw.includes(lbl.split(' ')[0]))
+                best = Math.max(best, s);
+            }
+            labelScore += best;
+            if (best > 0) matched++;
           }
-          labelScore += best;
-          if (best > 0) matched++;
-        }
-        labelScore /= kws.length;
+          labelScore /= kws.length;
 
-        // Suppress photos with NO label match (unless CLIP score is exceptional)
-        if (matched === 0 && clip < 0.215)
-          return { score: clip * 0.3, idx: i, path, date: cachedDates?.[i] ?? '' };
+          // Has labels but NONE match → suppress (iOS: don't show irrelevant)
+          if (matched === 0 && clip < 0.22)
+            return { score: clip * 0.25, idx: i, path, date: cachedDates?.[i] ?? '' };
+
+          // Hybrid: 30% CLIP + 70% label match
+          return { score: 0.30 * clip + 0.70 * labelScore,
+                   idx: i, path, date: cachedDates?.[i] ?? '' };
+        }
+        // Photo has labels array but count=0 → fall through to pure CLIP
       }
 
-      const final = hasLabels && kws.length > 0
-        ? 0.30 * clip + 0.70 * labelScore
-        : clip;
+      // Pure CLIP (no labels available for this photo)
+      return { score: clip, idx: i, path, date: cachedDates?.[i] ?? '' };
+    })
+    .filter(r => r.score > 0)
+    .sort((a, b) => b.score - a.score);
 
-      return { score: final, idx: i, path, date: cachedDates?.[i] ?? '' };
-    }).filter(r => r.score > 0).sort((a, b) => b.score - a.score);
-
-    // ── Cliff detection (Pixory 1 best practice) ─────────────────────────────
-    // If score drops more than 40% from previous → stop (tail is irrelevant)
-    const CLIFF_RATIO = 0.60;  // score < prev * 0.60 → cliff
-    const MIN_RESULTS = 5;     // always show at least 5 results
-    const MAX_RESULTS = 24;
+    // Cliff detection: stop when score drops >40% (Pixory 1 best practice)
     const top = [];
-    for (let i = 0; i < Math.min(scored.length, MAX_RESULTS); i++) {
-      if (top.length >= MIN_RESULTS && scored[i].score < top[top.length-1].score * CLIFF_RATIO)
-        break;
-      top.push(scored[i]);
+    for (const r of scored.slice(0, 48)) {
+      if (top.length >= 5 && r.score < top[top.length-1].score * 0.60) break;
+      top.push(r);
+      if (top.length >= 24) break;
     }
 
     const ms = Math.round(performance.now() - t0);
     console.log('[Pixory]', JSON.stringify(query),
-      translated !== query ? `→ EN: "${translated}"` : '',
-      '| labels:', hasLabels, '| kws:', kws,
+      '| hasLabels:', hasLabels, '| kws:', kws,
       '| top5:', top.slice(0,5).map(r => (r.score*100|0)+'% '+r.path.split(/[/\\]/).pop()),
-      '| cliff at', top.length, '/', scored.length, '|', ms+'ms');
+      '|', ms+'ms');
 
     renderResults(top, query);
     if (statusBar) statusBar.textContent = top.length > 0
