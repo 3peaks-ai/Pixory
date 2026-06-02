@@ -1365,13 +1365,15 @@ async function loadVectorsFromDB() {
   cachedThumbs   = rows.map(r => r.thumbDataUrl || "");
   cachedCC       = rows.map(r => r.cc || 0);
   cachedLabels   = rows.map(r => r.labels || null);  // null for pre-3.1 shards
-  const labelCount = cachedLabels.filter(Boolean).length;
-  if (labelCount > 0) {
-    const sample = parseLabels(cachedLabels[0]);
-    console.log("[Pixory] Labels loaded:", labelCount, "photos have labels. Sample:",
-      sample.map(([l,s]) => l + "(" + (s*100|0) + "%)").join(", "));
+  const withLabels = cachedLabels.filter(l => l && l[0] > 0).length;
+  if (withLabels > 0) {
+    const sample = parseLabels(cachedLabels.find(l => l && l[0] > 0));
+    console.log("[Pixory] Labels loaded:", withLabels, "/ " + cachedLabels.length,
+      "| sample:", sample.map(([l,s]) => l+"("+(s*100|0)+"%)").join(", "));
   } else {
-    console.log("[Pixory] No label data (pre-3.1 shard) — re-index for best results");
+    const hasArr = cachedLabels.filter(Boolean).length;
+    console.log("[Pixory] No label data — hasArr:", hasArr,
+      "re-index with updated indexer_gui.py for label-based search");
   }
   // Preprocess: dehubbify all stored vectors once at load time
   _preprocessVecs();
