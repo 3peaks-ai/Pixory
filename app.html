@@ -1909,78 +1909,77 @@ searchInput.addEventListener("change", _onSearchChange);  // extra fallback
 async function runSearch(query) {
   const grid = document.getElementById("results-grid");
   if (!cachedVecs || !window._encodeText) return;
-
-  const SPINNER = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
-  if (grid) grid.innerHTML = SPINNER;
+  if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
 
   try {
     const t0 = performance.now();
 
-    // ── Encode query ──────────────────────────────────────────────────────────
-    const expanded  = expandQuery(query);
-    const qv        = await textEmbed(expanded);
-    const keywords  = parseKeywords(query);  // for label matching
-    const hasLabels = cachedLabels && cachedLabels.some(Boolean);
+    // Encode + dehubbify query (subtract mean vector — same as iOS "remove generic photo direction")
+    const expanded = expandQuery(query);
+    const qvRaw = await textEmbed(expanded);
+    const qv = _meanVec ? _dehubbify(qvRaw) : qvRaw;
 
-    // ── Raw CLIP scores for all photos ────────────────────────────────────────
-    const dim = cachedVecs[0].length;
-
-    // Stage 1: text → top-16 candidates (raw CLIP)
-    const stage1 = topK(qv, _dehubbed || cachedVecs, cachedPaths, cachedDates, 16);
-
-    // Stage 2: visual query from top-8 (image-to-image refinement)
-    const visualQuery = new Float32Array(dim);
-    let totalW = 0;
-    for (const m of stage1.slice(0, 8)) {
-      const w = Math.max(0, m.score);
-      const v = cachedVecs[m.idx];
-      for (let j = 0; j < dim; j++) visualQuery[j] += v[j] * w;
-      totalW += w;
-    }
-    if (totalW > 0) for (let i = 0; i < dim; i++) visualQuery[i] /= totalW;
-    let vNorm = 0;
-    for (const x of visualQuery) vNorm += x * x;
-    vNorm = Math.sqrt(vNorm);
-    if (vNorm > 1e-8) for (let i = 0; i < dim; i++) visualQuery[i] /= vNorm;
-
-    // Stage 3: score ALL photos with blended CLIP + hub penalty + label filter
-    const ALPHA = 0.30;  // text weight; 70% image-to-image for precision
-    // Hard cutoff: photos below this score are NEVER shown (like iOS)
-    // With labels: lower base OK since labels boost relevant photos strongly
-    // Without labels (old index): slightly higher to still filter garbage
-    const HARD_CUTOFF = hasLabels ? 0.05 : 0.10;
-
+    // Score every photo: dehubbify image vec + hub penalty
     const allScored = cachedVecs.map((v, i) => {
-      const tScore  = cosineSimilarity(qv, v);
-      const iScore  = cosineSimilarity(visualQuery, v);
-      const hubP    = _hubPenalty ? _hubPenalty[i] : 0;
-      const clip    = (ALPHA * tScore + (1 - ALPHA) * iScore) * (1 - hubP);
-
-      // iOS-style hybrid: label filter kills garbage, boosts precise matches
-      const labels  = hasLabels ? parseLabels(cachedLabels[i]) : null;
-      const final   = hybridScore(clip, labels, keywords);
-
-      return { score: final, clipScore: clip, path: cachedPaths[i],
+      const dv  = _meanVec ? _dehubbify(v) : v;
+      const raw = cosineSimilarity(qv, dv);
+      const hub = _hubPenalty ? _hubPenalty[i] : 0;
+      return { score: raw * (1 - hub), path: cachedPaths[i],
                date: cachedDates ? cachedDates[i] : "", idx: i };
     });
 
-    // ── iOS-style filtering: only show photos that meet the threshold ─────────
-    const relevant = allScored
-      .filter(r => r.score >= HARD_CUTOFF)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 48);  // max 48 results (iOS shows ~20-30 for precise queries)
+    // Hard exclude: PNG = screenshot (before label system is available)
+    const hasLabels  = cachedLabels && cachedLabels.some(Boolean);
+    const keywords   = parseKeywords(query);
 
-    const ms = Math.round(performance.now() - t0);
-    console.log("[Pixory]", JSON.stringify(query),
-      "→", JSON.stringify(expanded),
-      "| kw:", keywords,
-      "| results:", relevant.length, "/ shown from", allScored.length,
-      "| top5:", relevant.slice(0,5).map(r => (r.score*100).toFixed(1)+"%"),
-      "|", ms+"ms");
+    const results = allScored
+      .filter((r, i) => {
+        // Always exclude PNG files (screenshots on iPhone)
+        if (cachedPaths[i] && cachedPaths[i].toLowerCase().endsWith('.png')) return false;
+        // With labels: also apply garbage label filter
+        if (hasLabels && cachedLabels[i]) {
+          const labels = parseLabels(cachedLabels[i]);
+          const isGarbage = labels.some(([, s, id]) =>
+            NEGATIVE_LABEL_IDS.has(id) && s > 0.45);
+          if (isGarbage) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => b.score - a.score);
 
-    renderResults(relevant, query);
+    // With labels: boost photos whose labels match query keywords
+    // Without labels: pure dehubbified cosine ranking
+    let ranked;
+    if (hasLabels && keywords.length > 0) {
+      ranked = results.map(r => {
+        const labels = cachedLabels[r.idx] ? parseLabels(cachedLabels[r.idx]) : [];
+        let labelBoost = 0;
+        for (const kw of keywords) {
+          for (const [lbl, s] of labels) {
+            if (lbl.includes(kw) || kw.includes(lbl.split(' ')[0])) {
+              labelBoost = Math.max(labelBoost, s);
+            }
+          }
+        }
+        return { ...r, score: labelBoost > 0
+          ? 0.5 * r.score + 0.5 * labelBoost
+          : r.score * 0.85 };  // slight penalty for no label match
+      }).sort((a, b) => b.score - a.score);
+    } else {
+      ranked = results;
+    }
 
-  } catch (err) {
+    const top = ranked.slice(0, 24);
+    const ms  = Math.round(performance.now() - t0);
+
+    console.log("[Pixory]", JSON.stringify(query), "→", JSON.stringify(expanded),
+      "| dehubbify:", !!_meanVec, "| labels:", hasLabels,
+      "| top5:", top.slice(0,5).map(r => (r.score*100).toFixed(1)+"%"),
+      "|", top.length, "results |", ms+"ms");
+
+    renderResults(top, query);
+
+  } catch(err) {
     console.error("[Pixory] Search error:", err);
     if (grid) grid.innerHTML =
       `<div style="grid-column:1/-1;padding:24px;color:#FF453A">Search error: ${err.message}</div>`;
