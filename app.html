@@ -2006,12 +2006,12 @@ function renderResults(results, query) {
           No results for "<b>${query}</b>"</div>
         <div style="color:#8E8E93;font-size:13px">${hint}</div>
       </div>`;
-    if (statusBar) statusBar.textContent = \`No results for "\${query}"\`;
+    if (statusBar) statusBar.textContent = `No results for "${query}"`;
     return;
   }
 
   if (statusBar) statusBar.textContent =
-    results.length > 0 ? \`\${results.length} results for "\${query}"\` : "";
+    results.length > 0 ? `${results.length} results for "${query}"` : "";
   results.forEach(r => g.appendChild(makeThumbnailItem(r)));
 }
 
