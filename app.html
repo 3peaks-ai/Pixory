@@ -1146,8 +1146,18 @@ async function loadCLIP() {
   };
 }
 async function textEmbed(query) {
-  if (window._encodeText) return await window._encodeText(query);
-  throw new Error("AI encoder not initialized");
+  if (!window._encodeText) throw new Error("AI encoder not initialized");
+  // Cache: identical queries (e.g. debounce firing twice) skip ONNX entirely
+  if (!textEmbed._cache) textEmbed._cache = new Map();
+  const cached = textEmbed._cache.get(query);
+  if (cached) return cached;
+  const vec = await window._encodeText(query);
+  // Keep last 32 queries; evict oldest on overflow
+  if (textEmbed._cache.size >= 32) {
+    textEmbed._cache.delete(textEmbed._cache.keys().next().value);
+  }
+  textEmbed._cache.set(query, vec);
+  return vec;
 }
 
 const IS_LOCAL = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
@@ -1369,6 +1379,16 @@ async function init() {
       switchTab('browse');
     } catch(e) { console.error('browse init:', e); }
 
+    // If IDB has no labels → old index, needs re-import
+    const hasAnyLabels = cachedLabels && cachedLabels.some(l => l && l[0] > 0);
+    if (!hasAnyLabels && cachedVecs && cachedVecs.length > 0) {
+      const bar = document.getElementById("status-bar");
+      if (bar) {
+        bar.style.cssText += ";background:#2d1f00;color:#f0a030;padding:8px 12px;font-size:12px;";
+        bar.textContent = "⚠️ Old index — re-import vectors_index.bin to enable search";
+      }
+    }
+
   } catch (err) {
     showError(`Step failed: ${err.name}: ${err.message}`);
   }
@@ -1388,8 +1408,9 @@ async function loadVectorsFromDB() {
       "| sample:", sample.map(([l,s]) => l+"("+(s*100|0)+"%)").join(", "));
   } else {
     const hasArr = cachedLabels.filter(Boolean).length;
-    console.log("[Pixory] No label data — hasArr:", hasArr,
-      "re-index with updated indexer_gui.py for label-based search");
+    console.warn("[Pixory] ⚠️ NO LABELS in IDB —",
+      hasArr, "records have a labels field but all empty.",
+      "→ Re-import the new vectors_index.bin via the Import tab.");
   }
   // Preprocess: dehubbify all stored vectors once at load time
   _preprocessVecs();
@@ -1921,9 +1942,15 @@ function _onSearchChange() {
   }
   searchTimer = setTimeout(() => runSearch(q), 300);
 }
-searchInput.addEventListener("input",  _onSearchChange);
-searchInput.addEventListener("keyup",  _onSearchChange);  // TG WebView fallback
-searchInput.addEventListener("change", _onSearchChange);  // extra fallback
+searchInput.addEventListener("input", _onSearchChange);
+// keyup: TG WebView fallback for cases where `input` doesn't fire (e.g. IME, paste).
+// Guard: only act if value actually changed since last `input` event.
+let _lastSearchVal = "";
+searchInput.addEventListener("keyup", () => {
+  const v = searchInput.value;
+  if (v !== _lastSearchVal) { _lastSearchVal = v; _onSearchChange(); }
+});
+searchInput.addEventListener("input", () => { _lastSearchVal = searchInput.value; }, { capture: true });
 
 
 // Russian → English photo search vocabulary.
@@ -2045,34 +2072,27 @@ async function runSearch(query) {
     const clipOnlyResults = scored.filter(r =>  r._clipOnly);
 
     if (labeledResults.length > 0) {
-      // ── Label mode: clean threshold ────────────────────────────────────
-      // Scores are 0.30*clip + 0.70*label → meaningful gap between match/no-match
+      // Label mode: scores 0.05–0.85, clear gap between match/no-match
       const best = labeledResults[0].score;
-      const LABEL_FLOOR = 0.15;                 // below this = no semantic match
-      const LABEL_RATIO = 0.55;                 // must be ≥55% of best score
-      top = labeledResults.filter(r =>
-        r.score >= LABEL_FLOOR && r.score >= best * LABEL_RATIO
-      ).slice(0, 30);
+      top = labeledResults
+        .filter(r => r.score >= 0.15 && r.score >= best * 0.55)
+        .slice(0, 30);
 
     } else {
-      // ── CLIP-only mode: adaptive "is this query answerable?" test ──────
-      // On a homogeneous library (all family photos) best CLIP score is ~0.24
-      // for ANY query — semantic noise. Only show results if:
-      //   1. The best score clears a minimum bar (query has at least some signal)
-      //   2. There's meaningful spread between top and bottom (not all flat noise)
-      const best  = clipOnlyResults.length ? clipOnlyResults[0].score  : 0;
-      const p20   = clipOnlyResults.length > 4 ? clipOnlyResults[4].score : 0;
-      const spread = best - p20;                // how much top-5 stands out
-
-      const CLIP_MIN_SCORE  = 0.245;            // L/14 meaningful signal floor
-      const CLIP_MIN_SPREAD = 0.010;            // top-5 must stand out from pack
-
-      if (best >= CLIP_MIN_SCORE && spread >= CLIP_MIN_SPREAD) {
-        // Query is answerable: show photos that are close to the best
-        const CLIP_RATIO = 0.93;                // within 7% of best score
-        top = clipOnlyResults.filter(r => r.score >= best * CLIP_RATIO).slice(0, 12);
+      // CLIP-only mode: no labels, all scores in tight 0.19–0.26 band.
+      // Can't gate on absolute threshold (best is always ~0.24 regardless of query).
+      // Strategy: show top N by relative spread — photos meaningfully above the pack.
+      // Use top-20 mean as baseline; show anything ≥ baseline + 0.5σ, max 12.
+      if (clipOnlyResults.length > 0) {
+        const allScores = clipOnlyResults.map(r => r.score);
+        const mean = allScores.reduce((a, b) => a + b, 0) / allScores.length;
+        const variance = allScores.reduce((s, x) => s + (x - mean) ** 2, 0) / allScores.length;
+        const sigma = Math.sqrt(variance);
+        const floor = mean + sigma * 0.5;  // top ~30% of distribution
+        top = clipOnlyResults.filter(r => r.score >= floor).slice(0, 12);
+        // If sigma is tiny (flat noise, σ < 0.003) → genuinely nothing to show
+        if (sigma < 0.003) top = [];
       }
-      // else: query unanswerable in CLIP-only mode → top stays [] → "No results"
     }
 
     const ms = Math.round(performance.now() - t0);
