@@ -2056,6 +2056,19 @@ async function runSearch(query) {
       '| top5:', top.slice(0,5).map(r => (r.score*100|0)+'% '+r.path.split(/[/\\]/).pop()),
       '|', ms+'ms');
 
+    // If no labels: warn user prominently — results will be poor on homogeneous libraries
+    if (!hasLabels && kws.length > 0) {
+      const g = document.getElementById("results-grid");
+      if (g && top.length > 0) {
+        const warn = document.createElement('div');
+        warn.style.cssText = 'grid-column:1/-1;padding:10px 14px;background:#2d1f00;' +
+          'border-radius:8px;font-size:12px;color:#f0a030;margin-bottom:4px;line-height:1.5;';
+        warn.textContent = '⚠️ Semantic labels missing — re-index to enable accurate search. ' +
+          'Showing CLIP-only results (low precision).';
+        g.prepend(warn);
+      }
+    }
+
     renderResults(top, query);
     if (statusBar) statusBar.textContent = top.length > 0
       ? `${top.length} results for "${query}" — ${ms}ms`
