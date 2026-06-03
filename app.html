@@ -1404,14 +1404,30 @@ async function loadVectorsFromDB() {
   const withLabels = cachedLabels.filter(l => l && l[0] > 0).length;
   if (withLabels > 0) {
     const sample = parseLabels(cachedLabels.find(l => l && l[0] > 0));
-    console.log("[Pixory] Labels loaded:", withLabels, "/ " + cachedLabels.length,
-      "| sample:", sample.map(([l,s]) => l+"("+(s*100|0)+"%)").join(", "));
-    // Diagnostic: show first 5 records with their labels to verify IDB content
-    for (let i = 0; i < Math.min(5, cachedLabels.length); i++) {
+    console.log("[Pixory] Labels loaded:", withLabels, "/ " + cachedLabels.length);
+
+    // Diagnostic A: show labels of REAL photos (.HEIC/.JPG), skip .PNG screenshots
+    console.log("═══ REAL PHOTO LABELS (.HEIC/.JPG only) ═══");
+    let shown = 0;
+    for (let i = 0; i < cachedPaths.length && shown < 6; i++) {
+      const p = (cachedPaths[i] || "").toLowerCase();
+      if (p.endsWith(".png")) continue;  // skip screenshots
       const lbls = parseLabels(cachedLabels[i]);
-      console.log("[Pixory] Photo", i, cachedPaths[i]?.split(/[/\\]/).pop(),
-        "→", lbls.length > 0 ? lbls.map(([l,s]) => l+"("+(s*100|0)+"%)").join(", ") : "NO LABELS");
+      const top3 = lbls.slice(0, 3).map(([l,s]) => l+"("+(s*100|0)+"%)").join(", ");
+      console.log("  " + cachedPaths[i].split(/[/\\]/).pop() + " → " + (top3 || "none"));
+      shown++;
     }
+
+    // Diagnostic B: do two DIFFERENT photos have distinct vectors?
+    // If image vectors encode content, two random photos should have
+    // moderate cosine (~0.3-0.6). If ~0.9+, vectors are collapsed (broken).
+    if (cachedVecs.length > 50) {
+      const a = cachedVecs[10], b = cachedVecs[400];
+      let dot = 0; for (let i = 0; i < a.length; i++) dot += a[i]*b[i];
+      console.log("  Inter-photo cosine (photo10 vs photo400): " + (dot*100|0) + "%");
+      console.log("  → healthy: 20-60%. If >85%, image vectors are collapsed.");
+    }
+    console.log("═══════════════════════════════════════════");
   } else {
     const hasArr = cachedLabels.filter(Boolean).length;
     console.warn("[Pixory] ⚠️ NO LABELS in IDB —",
@@ -2080,6 +2096,7 @@ async function runSearch(query) {
             "bathroom":["bathroom"],
           };
 
+          const topLabelScore = labels[0][1];  // labels sorted by score desc
           let matched = 0, labelScore = 0;
           for (const kw of kws) {
             const targets = SYNONYMS[kw] || [kw];
