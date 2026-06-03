@@ -108,9 +108,9 @@ body {
 #state-ready { justify-content: flex-start; padding: 0; align-items: stretch; }
 .search-bar {
   position: sticky; top: 0; z-index: 10;
-  background: #0d1117;
+  background: #161b22;
   padding: 12px 16px;
-  border-bottom: 1px solid #21262d;
+  border-bottom: 1px solid #30363d;
   display: flex; gap: 8px; align-items: center;
 }
 .search-input {
@@ -1406,6 +1406,12 @@ async function loadVectorsFromDB() {
     const sample = parseLabels(cachedLabels.find(l => l && l[0] > 0));
     console.log("[Pixory] Labels loaded:", withLabels, "/ " + cachedLabels.length,
       "| sample:", sample.map(([l,s]) => l+"("+(s*100|0)+"%)").join(", "));
+    // Diagnostic: show first 5 records with their labels to verify IDB content
+    for (let i = 0; i < Math.min(5, cachedLabels.length); i++) {
+      const lbls = parseLabels(cachedLabels[i]);
+      console.log("[Pixory] Photo", i, cachedPaths[i]?.split(/[/\\]/).pop(),
+        "→", lbls.length > 0 ? lbls.map(([l,s]) => l+"("+(s*100|0)+"%)").join(", ") : "NO LABELS");
+    }
   } else {
     const hasArr = cachedLabels.filter(Boolean).length;
     console.warn("[Pixory] ⚠️ NO LABELS in IDB —",
@@ -1922,13 +1928,14 @@ const grid        = document.getElementById("results-grid");
 const statusBar   = document.getElementById("status-bar");
 
 let searchTimer = null;
+let _searchBusy = false;
 
 searchInput.addEventListener("keydown", e => {
   if (e.key === "Enter") {
+    clearTimeout(searchTimer);
     searchInput.blur();
     const q = searchInput.value.trim();
     if (q) runSearch(q);
-    else renderResults([], "");
   }
 });
 
@@ -1940,17 +1947,13 @@ function _onSearchChange() {
     statusBar.textContent = `${cachedVecs?.length ?? 0} photos indexed`;
     return;
   }
-  searchTimer = setTimeout(() => runSearch(q), 600);
+  // 800ms: user must stop typing before search fires
+  // _searchBusy prevents new search while ONNX is running (4s)
+  searchTimer = setTimeout(() => {
+    if (!_searchBusy) runSearch(q);
+  }, 800);
 }
 searchInput.addEventListener("input", _onSearchChange);
-// keyup: TG WebView fallback for cases where `input` doesn't fire (e.g. IME, paste).
-// Guard: only act if value actually changed since last `input` event.
-let _lastSearchVal = "";
-searchInput.addEventListener("keyup", () => {
-  const v = searchInput.value;
-  if (v !== _lastSearchVal) { _lastSearchVal = v; _onSearchChange(); }
-});
-searchInput.addEventListener("input", () => { _lastSearchVal = searchInput.value; }, { capture: true });
 
 
 // Russian → English photo search vocabulary.
@@ -2005,6 +2008,8 @@ function translateQuery(q) {
 async function runSearch(query) {
   const grid = document.getElementById("results-grid");
   if (!cachedVecs || !window._encodeText) return;
+  if (_searchBusy) return;  // already running — don't stack
+  _searchBusy = true;
   if (grid) grid.innerHTML = `<div style="grid-column:1/-1;padding:32px;text-align:center;color:#8E8E93">Searching…</div>`;
 
   try {
@@ -2108,10 +2113,19 @@ async function runSearch(query) {
     }
 
     const ms = Math.round(performance.now() - t0);
+    // Diagnostic: show label matching details for first scored photo
+    if (scored.length > 0 && kws.length > 0) {
+      const first = scored[0];
+      const firstLabels = parseLabels(cachedLabels[first.idx]);
+      console.log("[Pixory] Top photo labels:", firstLabels.map(([l,s])=>l+"("+(s*100|0)+"%)").join(", "),
+        "| _clipOnly:", first._clipOnly, "| score:", (first.score*100|0)+"%");
+    }
     console.log('[Pixory]', JSON.stringify(query),
       '| hasLabels:', hasLabels, '| kws:', kws,
       '| top:', top.length,
       '| best:', scored.length ? (scored[0].score*100|0)+'%' : 'n/a',
+      '| labeled:', scored.filter(r=>!r._clipOnly).length,
+      '| clipOnly:', scored.filter(r=>r._clipOnly).length,
       '|', ms+'ms');
 
     // Warn when operating in degraded CLIP-only mode
@@ -2135,6 +2149,14 @@ async function runSearch(query) {
     console.error('[Pixory] Search error:', err);
     if (grid) grid.innerHTML =
       `<div style="grid-column:1/-1;padding:24px;color:#FF453A">Search error: ${err.message}</div>`;
+  } finally {
+    _searchBusy = false;
+    // If user kept typing while we were busy, run once more with current value
+    const latest = searchInput.value.trim();
+    if (latest && latest !== query) {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => runSearch(latest), 100);
+    }
   }
 }
 
