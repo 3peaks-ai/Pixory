@@ -201,13 +201,19 @@ body {
 /* ── Top bars ── */
 .top-bar {
   position: sticky; top: 0; z-index: 10;
-  background: #0d1117;
-  padding: 10px 16px 8px;
+  background: #161b22;
+  padding: 10px 14px 8px;
   border-bottom: 1px solid #444c56;
+  display: flex; align-items: center; gap: 10px;
+}
+.app-logo {
+  width: 28px; height: 28px; border-radius: 6px;
+  object-fit: cover; flex-shrink: 0;
 }
 .top-bar-browse {
-  display: flex; align-items: center; justify-content: space-between;
+  justify-content: flex-start;
 }
+.top-bar-browse .browse-title { flex: 1; }
 .browse-title { font-size: 17px; font-weight: 600; }
 .photo-count  { font-size: 12px; color: #ccc; }
 
@@ -281,11 +287,13 @@ body {
 
   <!-- Top bar: search input OR browse header -->
   <div class="top-bar" id="top-bar-search">
+    <img src="pxr.jpeg" class="app-logo" alt="" onerror="this.style.display='none'">
     <input class="search-input" id="search-input"
            type="search" placeholder="Search your photos…"
            autocomplete="off" autocorrect="off" spellcheck="false">
   </div>
   <div class="top-bar top-bar-browse" id="top-bar-browse" style="">
+    <img src="pxr.jpeg" class="app-logo" alt="" onerror="this.style.display='none'">
     <span class="browse-title">All Photos</span>
     <span class="photo-count" id="browse-count"></span>
   </div>
@@ -312,11 +320,11 @@ body {
       <span class="tab-label">Search</span>
     </button>
     <button class="tab-btn" id="tab-browse" onclick="switchTab('browse')">
-      <span class="tab-icon">🗂</span>
+      <span class="tab-icon">🖼️</span>
       <span class="tab-label">Browse</span>
     </button>
     <button class="tab-btn" id="tab-reimport" onclick="showImport()">
-      <span class="tab-icon">↻</span>
+      <span class="tab-icon">📥</span>
       <span class="tab-label">Import</span>
     </button>
   </div>
@@ -1436,36 +1444,6 @@ async function loadVectorsFromDB() {
     }
     console.log("═══════════════════════════════════════════");
 
-    // Diagnostic C (DECISIVE): does a photo's image vector align with the
-    // text of its OWN top label? This directly tests image↔text alignment.
-    // Find the photo most confident about "cat", encode "a photo of a cat",
-    // measure cosine. Healthy CLIP: 0.28-0.35. Broken alignment: ~0.20.
-    setTimeout(async () => {
-      if (!window._encodeText) return;
-      try {
-        const CAT_ID = LABEL_VOCAB.indexOf("cat");
-        let bestIdx = -1, bestScore = 0;
-        for (let i = 0; i < cachedLabels.length; i++) {
-          const lbls = parseLabels(cachedLabels[i]);
-          for (const [,s,id] of lbls)
-            if (id === CAT_ID && s > bestScore) { bestScore = s; bestIdx = i; }
-        }
-        if (bestIdx >= 0) {
-          const qv = await window._encodeText("a photo of a cat");
-          let dot = 0; const v = cachedVecs[bestIdx];
-          for (let i = 0; i < qv.length; i++) dot += qv[i]*v[i];
-          console.log("═══ ALIGNMENT TEST (image↔text) ═══");
-          console.log("  Photo most labeled 'cat': " + cachedPaths[bestIdx].split(/[/\\]/).pop());
-          console.log("  Its stored 'cat' label score: " + (bestScore*100|0) + "%");
-          console.log("  Live cosine[image, text 'a photo of a cat']: " + (dot*100|0) + "%");
-          if (dot < 0.25)
-            console.error("  ❌ MISALIGNED — image vectors not in text's CLIP space. Re-index with fp32 vision.");
-          else
-            console.log("  ✅ Aligned — image and text share space. Issue is elsewhere.");
-          console.log("═══════════════════════════════════");
-        }
-      } catch(e) { console.warn("Alignment test failed:", e); }
-    }, 2000);
   } else {
     const hasArr = cachedLabels.filter(Boolean).length;
     console.warn("[Pixory] ⚠️ NO LABELS in IDB —",
@@ -2101,13 +2079,35 @@ async function runSearch(query) {
 
   try {
     const t0  = performance.now();
-    const qv  = await textEmbed(expandQuery(query));
-    const kws = parseKeywords(translateQuery(query));
+
+    // ── Query expansion: encode several CLIP templates and use MAX cosine ──
+    // Single template ("a photo of cat") is noisy. Standard CLIP IR practice:
+    // try multiple natural phrasings, take the max similarity per photo.
+    // This sharply improves precision on personal libraries.
+    const translatedQ = translateQuery(query);
+    const templates = [
+      `a photo of a ${translatedQ}`,
+      `a picture of a ${translatedQ}`,
+      `${translatedQ}`,
+      `a photo of the ${translatedQ}`,
+    ];
+    const qvecs = [];
+    for (const t of templates) {
+      try {
+        const qv = await textEmbed(t);
+        // Dehubbify the query too so it matches dehubbified stored vectors
+        qvecs.push(_dehubbify(qv));
+      } catch(_) {}
+    }
+    if (qvecs.length === 0) qvecs.push(await textEmbed(expandQuery(query)));
+    const kws = parseKeywords(translatedQ);
 
     // hasLabels = true only if at least one photo has ≥1 actual label
-    // (Uint8Array([0]) is truthy but means 0 labels — don't treat as labeled)
     const hasLabels = !!(cachedLabels &&
       cachedLabels.some(l => l && l.length > 1 && l[0] > 0));
+
+    // Use dehubbified stored vectors when available (proven to increase spread)
+    const storedVecs = _dehubbed || cachedVecs;
 
     const scored = [];
     for (let i = 0; i < cachedVecs.length; i++) {
@@ -2115,9 +2115,16 @@ async function runSearch(query) {
       // Skip PNGs (screenshots, UI exports — rarely meaningful in photo search)
       if (path.toLowerCase().endsWith('.png')) continue;
 
-      const rawClip = cosineSimilarity(qv, cachedVecs[i]);
-      const hubP    = _hubPenalty ? _hubPenalty[i] : 0;
-      const clip    = rawClip * (1 - hubP);
+      // MAX cosine over all query templates — picks the best phrasing for this image
+      let bestClip = -1;
+      for (const qv of qvecs) {
+        let d = 0;
+        const v = storedVecs[i];
+        for (let k = 0; k < qv.length; k++) d += qv[k] * v[k];
+        if (d > bestClip) bestClip = d;
+      }
+      const hubP = _hubPenalty ? _hubPenalty[i] : 0;
+      const clip = bestClip * (1 - hubP);
 
       if (hasLabels && kws.length > 0 && cachedLabels[i]) {
         const labels = parseLabels(cachedLabels[i]);
@@ -2210,14 +2217,17 @@ async function runSearch(query) {
       const ss = scored.map(r => r.score);
       const mean = ss.reduce((a,b)=>a+b,0) / ss.length;
       const sigma = Math.sqrt(ss.reduce((s,x)=>s+(x-mean)**2,0) / ss.length);
-      // Relevant = clearly above average. k=1.0 keeps genuine matches,
-      // drops the noise floor. No artificial cap — show ALL that qualify.
-      const floor = mean + 1.0 * sigma;
+      const best = scored[0].score;
+      // PRECISION over recall: relevant = both (a) far above the noise floor
+      // AND (b) close to the best match. This filters out near-noise matches
+      // that mean+1σ used to let through (75-85 results on 526 photos).
+      // Tighter: 2.5σ above mean → roughly top 1% of distribution.
+      const floor = Math.max(mean + 2.5 * sigma, best * 0.85);
       top = scored.filter(r => r.score >= floor);
-      // Safety: if distribution is flat (sigma tiny), nothing is relevant
+      // Safety: if distribution is flat (no real matches), show nothing
       if (sigma < 0.015) top = [];
-      // Cap only at a sane upper bound to avoid rendering thousands
-      if (top.length > 200) top = top.slice(0, 200);
+      // Generous upper bound — if 50 babies, show 50; cap only to avoid huge renders
+      if (top.length > 100) top = top.slice(0, 100);
     }
     const ms = Math.round(performance.now() - t0);
     console.log('[Pixory]', JSON.stringify(query),
