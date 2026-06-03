@@ -1428,6 +1428,37 @@ async function loadVectorsFromDB() {
       console.log("  → healthy: 20-60%. If >85%, image vectors are collapsed.");
     }
     console.log("═══════════════════════════════════════════");
+
+    // Diagnostic C (DECISIVE): does a photo's image vector align with the
+    // text of its OWN top label? This directly tests image↔text alignment.
+    // Find the photo most confident about "cat", encode "a photo of a cat",
+    // measure cosine. Healthy CLIP: 0.28-0.35. Broken alignment: ~0.20.
+    setTimeout(async () => {
+      if (!window._encodeText) return;
+      try {
+        const CAT_ID = LABEL_VOCAB.indexOf("cat");
+        let bestIdx = -1, bestScore = 0;
+        for (let i = 0; i < cachedLabels.length; i++) {
+          const lbls = parseLabels(cachedLabels[i]);
+          for (const [,s,id] of lbls)
+            if (id === CAT_ID && s > bestScore) { bestScore = s; bestIdx = i; }
+        }
+        if (bestIdx >= 0) {
+          const qv = await window._encodeText("a photo of a cat");
+          let dot = 0; const v = cachedVecs[bestIdx];
+          for (let i = 0; i < qv.length; i++) dot += qv[i]*v[i];
+          console.log("═══ ALIGNMENT TEST (image↔text) ═══");
+          console.log("  Photo most labeled 'cat': " + cachedPaths[bestIdx].split(/[/\\]/).pop());
+          console.log("  Its stored 'cat' label score: " + (bestScore*100|0) + "%");
+          console.log("  Live cosine[image, text 'a photo of a cat']: " + (dot*100|0) + "%");
+          if (dot < 0.25)
+            console.error("  ❌ MISALIGNED — image vectors not in text's CLIP space. Re-index with fp32 vision.");
+          else
+            console.log("  ✅ Aligned — image and text share space. Issue is elsewhere.");
+          console.log("═══════════════════════════════════");
+        }
+      } catch(e) { console.warn("Alignment test failed:", e); }
+    }, 2000);
   } else {
     const hasArr = cachedLabels.filter(Boolean).length;
     console.warn("[Pixory] ⚠️ NO LABELS in IDB —",
@@ -1914,7 +1945,29 @@ function makeThumbnailItem(r) {
 
   item.innerHTML = inner + scoreTag + dateTag + geoTag;
 
-  item.addEventListener('click', () => {
+  item.addEventListener('click', async () => {
+    // ── DIAGNOSTIC: log this photo's vector alignment ──────────────────────
+    try {
+      const idx = r.idx;
+      const v = cachedVecs[idx];
+      const lbls = parseLabels(cachedLabels[idx]);
+      console.log("═══ PHOTO VECTOR DIAGNOSTIC ═══");
+      console.log("  File:", name);
+      console.log("  Stored labels:", lbls.map(([l,s])=>l+"("+(s*100|0)+"%)").join(", ") || "none");
+      console.log("  Vector dim:", v.length,
+                  "| norm:", Math.sqrt(v.reduce((s,x)=>s+x*x,0)).toFixed(3));
+      if (window._encodeText) {
+        for (const concept of ["a photo of a cat", "a photo of a baby", "a photo of the sea", "a photo of a dog"]) {
+          const qv = await window._encodeText(concept);
+          let dot = 0; for (let i=0;i<qv.length;i++) dot += qv[i]*v[i];
+          console.log(`  cosine[image, "${concept}"]: ${(dot*100).toFixed(1)}%`);
+        }
+        console.log("  → A matching concept should be 28-35%. If everything is ~20-24%,");
+        console.log("    image vectors are NOT aligned with text space (re-index needed).");
+      }
+      console.log("═══════════════════════════════");
+    } catch(e) { console.warn("Photo diagnostic failed:", e); }
+
     // If serve.py token available: try to open original
     if (_serveToken) {
       const originalUrl = serveUrl(name, _serveToken);
@@ -2096,7 +2149,9 @@ async function runSearch(query) {
             "bathroom":["bathroom"],
           };
 
-          const topLabelScore = labels[0][1];  // labels sorted by score desc
+          // Label cosine scores are ~0.08-0.40. Use them DIRECTLY.
+          // (Previous bug: dividing by labels[0] score exploded scores to 2400%
+          //  when the first label happened to be low, e.g. 1%.)
           let matched = 0, labelScore = 0;
           for (const kw of kws) {
             const targets = SYNONYMS[kw] || [kw];
@@ -2104,23 +2159,25 @@ async function runSearch(query) {
             for (const [lbl, s] of labels) {
               for (const t of targets) {
                 if (lbl.includes(t) || t.includes(lbl.split(' ')[0]))
-                  best = Math.max(best, s / Math.max(topLabelScore, 0.01));
+                  best = Math.max(best, s);
               }
             }
             labelScore += best;
-            if (best > 0.05) matched++;
+            if (best > 0.18) matched++;   // 0.18 = meaningful CLIP label match
           }
           labelScore /= kws.length;
 
-          // No label match → fall through to CLIP-only scoring (don't exclude)
+          // No strong label match → fall through to CLIP-only scoring
           if (matched === 0) {
             scored.push({ score: clip, idx: i, path,
                           date: cachedDates?.[i] ?? '', _clipOnly: true });
             continue;
           }
 
-          // Has label match: hybrid score, label component normalized to [0,1]
-          scored.push({ score: 0.25 * clip + 0.75 * labelScore, idx: i, path,
+          // Photo matched the keyword via labels — boost it clearly above
+          // CLIP-only photos. labelScore (~0.18-0.40) + 0.5 base ensures
+          // matched photos always outrank unmatched ones in the final sort.
+          scored.push({ score: 0.5 + labelScore + 0.2 * clip, idx: i, path,
                         date: cachedDates?.[i] ?? '' });
           continue;
         }
