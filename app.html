@@ -878,37 +878,47 @@ class CLIPTokenizer {
     return s;
   }
   _bpe(token) {
+    // token is a raw word WITHOUT </w>. We build the symbol list the way
+    // reference CLIP does: each char mapped through byte→unicode, and the
+    // LAST symbol gets "</w>" appended as a single unit (not 4 separate chars).
     if (this._cache[token]) return this._cache[token];
-    let w = token.split('').map(c => {
-      let out='';
-      for (const byte of new TextEncoder().encode(c))
-        out += this._b2u[byte] || String.fromCodePoint(byte);
-      return out;
-    });
+
+    // byte→unicode for each character, keep as separate symbols
+    let w = [];
+    for (const ch of token) {
+      let mapped = "";
+      for (const byte of new TextEncoder().encode(ch))
+        mapped += this._b2u[byte] || String.fromCodePoint(byte);
+      w.push(mapped);
+    }
+    if (w.length === 0) return "";
+    // Attach end-of-word marker to the LAST symbol as one token
+    w[w.length - 1] = w[w.length - 1] + "</w>";
+
     let pairs = this._pairs(w);
     while (pairs.size) {
-      let best=null, bestR=Infinity;
+      let best = null, bestR = Infinity;
       for (const p of pairs) {
-        const r = this.merges[p.replace('\x00',' ')];
-        if (r!==undefined && r<bestR) { bestR=r; best=p; }
+        const r = this.merges[p.replace('\x00', ' ')];
+        if (r !== undefined && r < bestR) { bestR = r; best = p; }
       }
-      if (!best) break;
-      const [a,b] = best.split('\x00');
-      const nw=[];
-      let i=0;
-      while (i<w.length) {
+      if (best === null) break;
+      const [a, b] = best.split('\x00');
+      const nw = [];
+      let i = 0;
+      while (i < w.length) {
         const j = w.indexOf(a, i);
-        if (j===-1) { nw.push(...w.slice(i)); break; }
-        nw.push(...w.slice(i,j));
-        if (j<w.length-1 && w[j+1]===b) { nw.push(a+b); i=j+2; }
-        else { nw.push(a); i=j+1; }
+        if (j === -1) { nw.push(...w.slice(i)); break; }
+        nw.push(...w.slice(i, j));
+        if (j < w.length - 1 && w[j + 1] === b) { nw.push(a + b); i = j + 2; }
+        else { nw.push(a); i = j + 1; }
       }
-      w=nw;
-      if (w.length===1) break;
-      pairs=this._pairs(w);
+      w = nw;
+      if (w.length === 1) break;
+      pairs = this._pairs(w);
     }
-    const r=w.join(' ');
-    this._cache[token]=r;
+    const r = w.join(' ');
+    this._cache[token] = r;
     return r;
   }
   tokenize(text, maxLen=77) {
@@ -918,7 +928,8 @@ class CLIPTokenizer {
     const ids=[SOT];
     const words = text.match(/[\w']+|[^\w\s]/g) || [];
     for (const word of words) {
-      const bpe = this._bpe(word+'</w>').split(' ');
+      // Pass the raw word — _bpe attaches </w> internally to the last symbol
+      const bpe = this._bpe(word).split(' ');
       for (const t of bpe) { if (this.vocab[t]!==undefined) ids.push(this.vocab[t]); }
     }
     ids.push(EOT);
