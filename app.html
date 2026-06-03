@@ -1990,81 +1990,106 @@ async function runSearch(query) {
     const hasLabels = !!(cachedLabels &&
       cachedLabels.some(l => l && l.length > 1 && l[0] > 0));
 
-    const scored = cachedVecs.map((v, i) => {
+    const scored = [];
+    for (let i = 0; i < cachedVecs.length; i++) {
       const path = cachedPaths[i] || '';
-      if (path.toLowerCase().endsWith('.png'))
-        return { score: -1, idx: i, path, date: '' };
+      // Skip PNGs (screenshots, UI exports — rarely meaningful in photo search)
+      if (path.toLowerCase().endsWith('.png')) continue;
 
-      const rawClip = cosineSimilarity(qv, v);
+      const rawClip = cosineSimilarity(qv, cachedVecs[i]);
       const hubP    = _hubPenalty ? _hubPenalty[i] : 0;
       const clip    = rawClip * (1 - hubP);
 
-      // Label scoring — only when photo actually HAS labels
       if (hasLabels && kws.length > 0 && cachedLabels[i]) {
         const labels = parseLabels(cachedLabels[i]);
-
         if (labels.length > 0) {
-          // Garbage filter
+          // Hard filter: photo labeled as screenshot/document/UI
           if (labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.45))
-            return { score: -1, idx: i, path, date: '' };
+            continue;
 
-          // Keyword match
+          // Keyword match against labels
           let matched = 0, labelScore = 0;
           for (const kw of kws) {
             let best = 0;
-            for (const [lbl, s] of labels) {
+            for (const [lbl, s] of labels)
               if (lbl.includes(kw) || kw.includes(lbl.split(' ')[0]))
                 best = Math.max(best, s);
-            }
             labelScore += best;
             if (best > 0) matched++;
           }
           labelScore /= kws.length;
 
-          // Has labels but NONE match → suppress (iOS: don't show irrelevant)
-          if (matched === 0 && clip < 0.22)
-            return { score: clip * 0.25, idx: i, path, date: cachedDates?.[i] ?? '' };
+          // No label match AND weak CLIP → exclude entirely
+          if (matched === 0 && clip < 0.22) continue;
 
-          // Hybrid: 30% CLIP + 70% label match
-          return { score: 0.30 * clip + 0.70 * labelScore,
-                   idx: i, path, date: cachedDates?.[i] ?? '' };
+          // Hybrid: 30% CLIP + 70% label
+          scored.push({ score: 0.30 * clip + 0.70 * labelScore, idx: i, path,
+                        date: cachedDates?.[i] ?? '' });
+          continue;
         }
-        // Photo has labels array but count=0 → fall through (treat as unlabeled)
       }
 
-      // No labels for this photo:
-      // If library HAS labels and user typed keywords, suppress unlabeled
-      // photos the same way as labeled-but-no-match (avoids pollution)
-      if (hasLabels && kws.length > 0 && clip < 0.22)
-        return { score: clip * 0.25, idx: i, path, date: cachedDates?.[i] ?? '' };
-      return { score: clip, idx: i, path, date: cachedDates?.[i] ?? '' };
-    })
-    .filter(r => r.score > 0)
-    .sort((a, b) => b.score - a.score);
+      // CLIP-only path (no labels, or photo has no label data):
+      // Store raw clip score for distribution analysis below
+      scored.push({ score: clip, idx: i, path, date: cachedDates?.[i] ?? '', _clipOnly: true });
+    }
 
-    // Cliff detection: stop when score drops >40% (Pixory 1 best practice)
-    const top = [];
-    for (const r of scored.slice(0, 48)) {
-      if (top.length >= 5 && r.score < top[top.length-1].score * 0.60) break;
-      top.push(r);
-      if (top.length >= 24) break;
+    // ── iOS-style relevance filtering ─────────────────────────────────────
+    // With labels: scores range 0.05–0.85, threshold at 0.15 is meaningful
+    // CLIP-only: scores range 0.19–0.26 on homogeneous libraries — need to
+    // detect whether the query is actually answerable before showing anything.
+    scored.sort((a, b) => b.score - a.score);
+
+    let top = [];
+    const labeledResults  = scored.filter(r => !r._clipOnly);
+    const clipOnlyResults = scored.filter(r =>  r._clipOnly);
+
+    if (labeledResults.length > 0) {
+      // ── Label mode: clean threshold ────────────────────────────────────
+      // Scores are 0.30*clip + 0.70*label → meaningful gap between match/no-match
+      const best = labeledResults[0].score;
+      const LABEL_FLOOR = 0.15;                 // below this = no semantic match
+      const LABEL_RATIO = 0.55;                 // must be ≥55% of best score
+      top = labeledResults.filter(r =>
+        r.score >= LABEL_FLOOR && r.score >= best * LABEL_RATIO
+      ).slice(0, 30);
+
+    } else {
+      // ── CLIP-only mode: adaptive "is this query answerable?" test ──────
+      // On a homogeneous library (all family photos) best CLIP score is ~0.24
+      // for ANY query — semantic noise. Only show results if:
+      //   1. The best score clears a minimum bar (query has at least some signal)
+      //   2. There's meaningful spread between top and bottom (not all flat noise)
+      const best  = clipOnlyResults.length ? clipOnlyResults[0].score  : 0;
+      const p20   = clipOnlyResults.length > 4 ? clipOnlyResults[4].score : 0;
+      const spread = best - p20;                // how much top-5 stands out
+
+      const CLIP_MIN_SCORE  = 0.245;            // L/14 meaningful signal floor
+      const CLIP_MIN_SPREAD = 0.010;            // top-5 must stand out from pack
+
+      if (best >= CLIP_MIN_SCORE && spread >= CLIP_MIN_SPREAD) {
+        // Query is answerable: show photos that are close to the best
+        const CLIP_RATIO = 0.93;                // within 7% of best score
+        top = clipOnlyResults.filter(r => r.score >= best * CLIP_RATIO).slice(0, 12);
+      }
+      // else: query unanswerable in CLIP-only mode → top stays [] → "No results"
     }
 
     const ms = Math.round(performance.now() - t0);
     console.log('[Pixory]', JSON.stringify(query),
       '| hasLabels:', hasLabels, '| kws:', kws,
-      '| top5:', top.slice(0,5).map(r => (r.score*100|0)+'% '+r.path.split(/[/\\]/).pop()),
+      '| top:', top.length,
+      '| best:', scored.length ? (scored[0].score*100|0)+'%' : 'n/a',
       '|', ms+'ms');
 
-    // If no labels: warn user prominently — results will be poor on homogeneous libraries
-    if (!hasLabels && kws.length > 0) {
+    // Warn when operating in degraded CLIP-only mode
+    if (!hasLabels && kws.length > 0 && top.length > 0) {
       const g = document.getElementById("results-grid");
-      if (g && top.length > 0) {
+      if (g) {
         const warn = document.createElement('div');
-        warn.style.cssText = 'grid-column:1/-1;padding:10px 14px;background:#2d1f00;' +
-          'border-radius:8px;font-size:12px;color:#f0a030;margin-bottom:4px;line-height:1.5;';
-        warn.textContent = '⚠️ Semantic labels missing — re-index to enable accurate search. ' +
-          'Showing CLIP-only results (low precision).';
+        warn.style.cssText = 'grid-column:1/-1;padding:8px 12px;background:#2d1f00;' +
+          'border-radius:8px;font-size:11px;color:#f0a030;margin-bottom:6px;';
+        warn.textContent = '⚠️ No semantic labels — re-index for accurate search.';
         g.prepend(warn);
       }
     }
