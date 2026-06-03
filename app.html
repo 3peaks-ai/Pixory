@@ -2115,61 +2115,35 @@ async function runSearch(query) {
             "bathroom":["bathroom"],
           };
 
-          // ZERO-SHOT CLASSIFICATION strategy (instead of pure retrieval):
-          // For each query keyword, check if it maps to a known LABEL_VOCAB
-          // concept. If yes, REQUIRE that concept to appear in this photo's
-          // labels with meaningful score. This is "what is the photo OF",
-          // not "what does the photo look like".
-          //
-          // Why this works: shoes-on-floor get cosine 22% with "dog" due to
-          // CLIP co-occurrence bias, but their TOP labels are footwear/floor —
-          // never "dog". Real dog photos have "dog" in their labels.
-          //
-          // We check if any query keyword has a known LABEL_VOCAB mapping
-          // (via SYNONYMS). If so, the photo MUST have a matching label.
-          let queryHasKnownConcept = false;
-          let photoHasMatchingLabel = false;
+          // Labels are NOISY and INCOMPLETE on this library:
+          //   - shoes have label "dog" (false positive in shard)
+          //   - baby photos lack "baby" label (false negative in shard)
+          // So we CANNOT use label match as a hard filter — it loses recall.
+          // We rank purely by CLIP cosine; a label match adds a small bonus
+          // to push genuinely-labeled matches above pure-cosine guesses.
+          let labelBonus = 0;
           for (const kw of kws) {
             const targets = SYNONYMS[kw] || [kw];
-            // Check if ANY target term exists in LABEL_VOCAB
-            const targetInVocab = targets.some(t =>
-              LABEL_VOCAB.some(lbl => lbl.includes(t) || t.includes(lbl.split(' ')[0])));
-            if (targetInVocab) {
-              queryHasKnownConcept = true;
-              // Photo must have a label matching one of the target concepts
-              // with reasonable confidence (>0.18)
-              for (const [lbl, s] of labels) {
-                if (s < 0.18) continue;
-                for (const t of targets) {
-                  if (lbl.includes(t) || t.includes(lbl.split(' ')[0])) {
-                    photoHasMatchingLabel = true; break;
-                  }
+            for (const [lbl, s] of labels) {
+              for (const t of targets) {
+                if ((lbl.includes(t) || t.includes(lbl.split(' ')[0])) && s > 0.20) {
+                  labelBonus = Math.max(labelBonus, 0.04);
                 }
-                if (photoHasMatchingLabel) break;
               }
             }
           }
-          // Garbage filter: screenshots/documents
+
+          // Hard filter ONLY for screenshots/documents (reliable signal)
           if (labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.20))
             continue;
 
-          // If query mapped to a known concept but THIS photo doesn't have
-          // that concept in its labels → skip. This kills shoes-in-"dog",
-          // bottle-in-"boy" type co-occurrence false positives.
-          if (queryHasKnownConcept && !photoHasMatchingLabel) continue;
-
-          // Rank by CLIP cosine + bonus for confirmed label match
-          scored.push({
-            score: clip + (photoHasMatchingLabel ? 0.05 : 0),
-            idx: i, path,
-            date: cachedDates?.[i] ?? ''
-          });
+          scored.push({ score: clip + labelBonus, idx: i, path,
+                        date: cachedDates?.[i] ?? '' });
           continue;
         }
       }
 
-      // No labels for this photo OR query has no known concept:
-      // Rank by CLIP cosine, garbage filter on labels if present
+      // No labels for this photo: rank by CLIP cosine
       if (cachedLabels[i]) {
         const lbls = parseLabels(cachedLabels[i]);
         if (lbls.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.20)) continue;
