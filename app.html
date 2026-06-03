@@ -41,7 +41,7 @@
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: #0d1117;
-  color: #e6edf3;
+  color: #fff;
   min-height: 100vh;
 }
 
@@ -67,26 +67,26 @@ body {
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.loading-text { color: #8b949e; font-size: 14px; }
+.loading-text { color: #ccc; font-size: 14px; }
 
 /* ── Import ── */
 .import-card {
   background: #161b22;
-  border: 1px solid #30363d;
+  border: 1px solid #555;
   border-radius: 14px;
   padding: 28px 24px;
   max-width: 340px;
   width: 100%;
 }
 .import-card h2 { font-size: 18px; margin-bottom: 8px; }
-.import-card p  { color: #8b949e; font-size: 13px; line-height: 1.5; }
+.import-card p  { color: #ccc; font-size: 13px; line-height: 1.5; }
 .import-steps   { text-align: left; margin: 16px 0; }
-.import-steps li { color: #8b949e; font-size: 12px; margin: 6px 0 6px 16px; }
+.import-steps li { color: #ccc; font-size: 12px; margin: 6px 0 6px 16px; }
 .btn-cancel {
   margin-top: 8px;
   background: none;
-  border: 1px solid #30363d;
-  color: #8b949e;
+  border: 1px solid #555;
+  color: #ccc;
   padding: 10px 20px;
   border-radius: 10px;
   font-size: 14px;
@@ -124,11 +124,11 @@ body {
   outline: none;
 }
 .search-input:focus { border-color: #58a6ff; }
-.search-input::placeholder { color: #8b949e; }
+.search-input::placeholder { color: #ccc; }
 .status-bar {
   padding: 6px 16px;
   font-size: 12px;
-  color: #8b949e;
+  color: #ccc;
   min-height: 24px;
 }
 .results-grid {
@@ -167,11 +167,11 @@ body {
   font-size: 13px; line-height: 1;
   filter: drop-shadow(0 1px 2px rgba(0,0,0,0.8));
 }
-.empty { color: #8b949e; font-size: 14px; text-align: center; padding: 48px 16px; }
+.empty { color: #ccc; font-size: 14px; text-align: center; padding: 48px 16px; }
 .import-btn-small {
   position: fixed; bottom: 90px; right: 16px;
-  background: #21262d; color: #8b949e;
-  border: 1px solid #30363d; border-radius: 20px;
+  background: #21262d; color: #ccc;
+  border: 1px solid #555; border-radius: 20px;
   padding: 10px 16px; font-size: 13px; cursor: pointer;
   z-index: 100;
   -webkit-tap-highlight-color: rgba(255,255,255,0.1);
@@ -191,7 +191,7 @@ body {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center;
   background: none; border: none;
-  color: #8b949e; cursor: pointer; gap: 2px;
+  color: #ccc; cursor: pointer; gap: 2px;
   -webkit-tap-highlight-color: rgba(255,255,255,0.05);
 }
 .tab-btn.tab-active { color: #58a6ff; }
@@ -203,18 +203,18 @@ body {
   position: sticky; top: 0; z-index: 10;
   background: #0d1117;
   padding: 10px 16px 8px;
-  border-bottom: 1px solid #21262d;
+  border-bottom: 1px solid #444c56;
 }
 .top-bar-browse {
   display: flex; align-items: center; justify-content: space-between;
 }
 .browse-title { font-size: 17px; font-weight: 600; }
-.photo-count  { font-size: 12px; color: #8b949e; }
+.photo-count  { font-size: 12px; color: #ccc; }
 
 /* ── Geo chips ── */
 .geo-chips {
   padding: 8px 16px;
-  border-bottom: 1px solid #21262d;
+  border-bottom: 1px solid #444c56;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
@@ -225,10 +225,10 @@ body {
 }
 .geo-chip {
   display: flex; align-items: center; gap: 5px;
-  background: #21262d; border: 1px solid #30363d;
+  background: #21262d; border: 1px solid #555;
   border-radius: 16px; padding: 5px 12px;
   font-size: 12px; cursor: pointer; white-space: nowrap;
-  color: #8b949e;
+  color: #ccc;
   -webkit-tap-highlight-color: rgba(255,255,255,0.05);
   transition: background 0.1s;
 }
@@ -238,7 +238,7 @@ body {
 .chip-flag { font-size: 15px; }
 .chip-count {
   background: #30363d; border-radius: 8px;
-  padding: 1px 6px; font-size: 10px; color: #8b949e;
+  padding: 1px 6px; font-size: 10px; color: #ccc;
 }
 
 /* ── Results grid bottom padding (tab bar) ── */
@@ -252,7 +252,7 @@ body {
 <div id="state-loading" class="active">
   <div class="spinner"></div>
   <div class="loading-text" id="loading-msg">Loading AI model…</div>
-  <div id="load-detail" style="color:#555;font-size:11px;margin-top:4px">First launch: ~120 MB (cached forever)</div>
+  <div id="load-detail" style="color:#ccc;font-size:11px;margin-top:4px">First launch: ~120 MB (cached forever)</div>
 </div>
 
 <!-- STATE: Import -->
@@ -409,14 +409,14 @@ function askPassphrase(filename) {
                   padding:28px 24px;max-width:340px;width:100%;text-align:center;">
         <div style="font-size:28px;margin-bottom:12px;">🔒</div>
         <h3 style="margin-bottom:8px;font-size:17px;">Encrypted Index</h3>
-        <p style="color:#8b949e;font-size:13px;margin-bottom:20px;line-height:1.5;">
+        <p style="color:#ccc;font-size:13px;margin-bottom:20px;line-height:1.5;">
           <strong>${filename}</strong> is encrypted.<br>
           Enter the passphrase you set when indexing.
         </p>
         <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;
                     padding:12px;margin-bottom:16px;text-align:left;">
           <div style="color:#e67e22;font-size:12px;margin-bottom:6px;">⚠️ Remember your passphrase</div>
-          <div style="color:#8b949e;font-size:11px;line-height:1.5;">
+          <div style="color:#ccc;font-size:11px;line-height:1.5;">
             Without it you cannot import this index<br>on another device or after reinstall.
           </div>
         </div>
@@ -432,7 +432,7 @@ function askPassphrase(filename) {
           Unlock
         </button>
         <button id="pp-cancel" style="width:100%;background:transparent;
-          color:#8b949e;border:1px solid #30363d;border-radius:10px;
+          color:#ccc;border:1px solid #30363d;border-radius:10px;
           padding:10px;font-size:13px;cursor:pointer;">
           Cancel
         </button>
@@ -1420,6 +1420,46 @@ async function loadVectorsFromDB() {
   }
   // Preprocess: dehubbify all stored vectors once at load time
   _preprocessVecs();
+
+  // ── SPACE ALIGNMENT SELF-TEST ──────────────────────────────────────────
+  // The core question: are text and image embeddings in the SAME space?
+  // Test: encode several distinct concepts as text, measure how much each
+  // concept's BEST image match exceeds the GLOBAL AVERAGE similarity.
+  // Aligned space → big gap (best match clearly above average).
+  // Broken space → every concept ~same as average (random noise ~0.24).
+  setTimeout(async () => {
+    if (!window._encodeText || !cachedVecs || cachedVecs.length < 10) return;
+    try {
+      const concepts = ["a cat", "a beach", "a car", "a person smiling", "snow"];
+      const lines = [];
+      let totalGap = 0;
+      for (const c of concepts) {
+        const qv = await window._encodeText(c);
+        let best = -1, sum = 0;
+        for (const v of cachedVecs) {
+          let d = 0; for (let i = 0; i < qv.length; i++) d += qv[i]*v[i];
+          if (d > best) best = d;
+          sum += d;
+        }
+        const avg = sum / cachedVecs.length;
+        const gap = best - avg;
+        totalGap += gap;
+        lines.push(`${c}: best=${(best*100|0)}% avg=${(avg*100|0)}% gap=${(gap*100).toFixed(1)}pp`);
+      }
+      const meanGap = totalGap / concepts.length;
+      console.log("═══ SPACE ALIGNMENT TEST ═══");
+      lines.forEach(l => console.log("  " + l));
+      console.log(`  MEAN GAP: ${(meanGap*100).toFixed(1)}pp`);
+      if (meanGap < 0.04) {
+        console.error("  ❌ SPACES NOT ALIGNED — text/image embeddings incompatible.");
+        console.error("  Cause: text_model and vision_model are different CLIP variants,");
+        console.error("  or INT8 quantization broke the text projection. Search cannot work.");
+      } else {
+        console.log("  ✅ Spaces aligned — search should work. gap > 4pp is healthy.");
+      }
+      console.log("════════════════════════════");
+    } catch(e) { console.warn("Self-test failed:", e); }
+  }, 1500);
 }
 
 
@@ -1884,7 +1924,7 @@ function makeThumbnailItem(r) {
     inner = `<div style="width:100%;height:100%;display:flex;align-items:center;
       justify-content:center;background:#161b22;flex-direction:column;gap:3px">
       <div style="font-size:22px">🖼</div>
-      <div style="font-size:9px;color:#555;padding:2px 4px;text-align:center;
+      <div style="font-size:9px;color:#ccc;padding:2px 4px;text-align:center;
         word-break:break-all;line-height:1.3">${name}</div>
     </div>`;
   }
@@ -2041,16 +2081,55 @@ async function runSearch(query) {
           if (labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.08))
             continue;
 
-          // Keyword match: find best label score for each query keyword
-          // Normalize by top label score so relative match strength matters,
-          // not absolute CLIP cosine values (which are always low ~0.08-0.20)
-          const topLabelScore = labels[0][1];  // labels sorted by score desc
+          // Synonym expansion: query word → related LABEL_VOCAB terms
+          const SYNONYMS = {
+            "baby":["baby","infant","toddler","child","boy","girl"],
+            "kid":["child","boy","girl","baby","toddler","infant"],
+            "child":["child","baby","infant","toddler","boy","girl"],
+            "children":["child","boy","girl","baby","toddler"],
+            "boy":["boy","child","baby","toddler"],
+            "girl":["girl","child","baby","toddler"],
+            "sea":["ocean or sea","beach","swimming pool"],
+            "ocean":["ocean or sea","beach"],
+            "beach":["beach","ocean or sea","swimming pool"],
+            "pool":["swimming pool","beach"],
+            "swim":["swimming","swimming pool","ocean or sea"],
+            "sleep":["sleeping"],
+            "eat":["eating food"],
+            "drink":["drinking"],
+            "play":["playing"],
+            "run":["running"],
+            "smile":["smiling"],
+            "laugh":["laughing"],
+            "cry":["crying"],
+            "hug":["hugging"],
+            "birthday":["birthday celebration"],
+            "holiday":["holiday celebration"],
+            "xmas":["holiday celebration"],
+            "christmas":["holiday celebration"],
+            "snow":["snow landscape"],
+            "mountain":["mountains"],
+            "forest":["forest"],
+            "dog":["dog"],
+            "cat":["cat"],
+            "car":["car or vehicle"],
+            "home":["home interior","living room","bedroom","kitchen"],
+            "house":["home interior"],
+            "kitchen":["kitchen"],
+            "bedroom":["bedroom"],
+            "bathroom":["bathroom"],
+          };
+
           let matched = 0, labelScore = 0;
           for (const kw of kws) {
+            const targets = SYNONYMS[kw] || [kw];
             let best = 0;
-            for (const [lbl, s] of labels)
-              if (lbl.includes(kw) || kw.includes(lbl.split(' ')[0]))
-                best = Math.max(best, s / Math.max(topLabelScore, 0.01));
+            for (const [lbl, s] of labels) {
+              for (const t of targets) {
+                if (lbl.includes(t) || t.includes(lbl.split(' ')[0]))
+                  best = Math.max(best, s / Math.max(topLabelScore, 0.01));
+              }
+            }
             labelScore += best;
             if (best > 0.05) matched++;
           }
