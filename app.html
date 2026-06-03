@@ -1452,6 +1452,60 @@ async function loadVectorsFromDB() {
   }
   // Preprocess: dehubbify all stored vectors once at load time
   _preprocessVecs();
+  // Compute per-photo distinctiveness (filters semantically-empty "swamp" photos)
+  _computeDistinctiveness();
+}
+
+// ── DISTINCTIVENESS: filter out semantically-empty photos ─────────────────
+// Some photos (collages, blurry, cluttered scenes) have vectors that give
+// ~equal cosine to ALL concepts — they surface for every query at noise level
+// and produce the "shoes on the floor in dog search" garbage. We probe each
+// photo with a set of unrelated concepts once at load. Photos where the
+// spread (max - mean) is too small are flagged as low-distinctiveness and
+// excluded from search results.
+let _distinctiveness = null;       // Float32Array[N], per-photo spread score
+const _DISTINCT_FLOOR = 0.018;     // empirical: spread below ~1.8pp = noise
+
+async function _computeDistinctiveness() {
+  if (!window._encodeText || !cachedVecs || cachedVecs.length === 0) return;
+  // 6 unrelated probe concepts span the typical photo space
+  const PROBES = [
+    "a photo of a person",
+    "a photo of an animal",
+    "a photo of nature outdoors",
+    "a photo of food",
+    "a photo of a vehicle",
+    "a photo of a building",
+  ];
+  console.log("[Pixory] Computing distinctiveness (one-time, ~3s)…");
+  const t0 = performance.now();
+  const probeVecs = [];
+  for (const p of PROBES) {
+    try { probeVecs.push(await textEmbed(p)); } catch(_) {}
+  }
+  if (probeVecs.length < 3) { console.warn("[Pixory] distinctiveness aborted"); return; }
+  const N = cachedVecs.length;
+  _distinctiveness = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const v = cachedVecs[i];
+    let maxS = -1, sumS = 0;
+    for (const pv of probeVecs) {
+      let d = 0; for (let k = 0; k < pv.length; k++) d += pv[k] * v[k];
+      if (d > maxS) maxS = d;
+      sumS += d;
+    }
+    const meanS = sumS / probeVecs.length;
+    // Spread = how much the BEST probe stands out from average.
+    // High spread → photo has clear semantic content
+    // Low spread → photo is a noise swamp
+    _distinctiveness[i] = maxS - meanS;
+  }
+  const ms = (performance.now() - t0) | 0;
+  // Stats for sanity check
+  const sorted = Array.from(_distinctiveness).sort((a,b)=>a-b);
+  const median = sorted[sorted.length >> 1];
+  const dropped = sorted.filter(x => x < _DISTINCT_FLOOR).length;
+  console.log(`[Pixory] Distinctiveness ready (${ms}ms) | median spread: ${(median*100).toFixed(2)}pp | ${dropped}/${N} below floor (will be filtered from search)`);
 }
 
 
@@ -1930,37 +1984,7 @@ function makeThumbnailItem(r) {
 
   item.innerHTML = inner + scoreTag + dateTag + geoTag;
 
-  item.addEventListener('click', async () => {
-    // ── DIAGNOSTIC: log this photo's vector alignment ──────────────────────
-    try {
-      let idx = r.idx;
-      // idx may be stale after sort/filter — verify it points to this photo
-      if (cachedPaths[idx] !== r.path) {
-        idx = cachedPaths.indexOf(r.path);
-      }
-      const v = (idx >= 0) ? cachedVecs[idx] : null;
-      console.log("═══ PHOTO VECTOR DIAGNOSTIC ═══");
-      console.log("  File:", name, "| idx:", idx);
-      if (!v) {
-        console.warn("  No vector found for this photo (idx=" + idx + ")");
-      } else {
-        const lbls = (idx >= 0 && cachedLabels[idx]) ? parseLabels(cachedLabels[idx]) : [];
-        console.log("  Stored labels:", lbls.map(([l,s])=>l+"("+(s*100|0)+"%)").join(", ") || "none");
-        console.log("  Vector dim:", v.length,
-                    "| norm:", Math.sqrt(Array.from(v).reduce((s,x)=>s+x*x,0)).toFixed(3));
-        if (window._encodeText) {
-          for (const concept of ["a photo of a cat", "a photo of a baby", "a photo of the sea", "a photo of a dog"]) {
-            const qv = await window._encodeText(concept);
-            let dot = 0; for (let i=0;i<qv.length;i++) dot += qv[i]*v[i];
-            console.log(`  cosine[image, "${concept}"]: ${(dot*100).toFixed(1)}%`);
-          }
-          console.log("  → Matching concept should be clearly highest. If all ~equal,");
-          console.log("    image vectors are misaligned with text space.");
-        }
-      }
-      console.log("═══════════════════════════════");
-    } catch(e) { console.warn("Photo diagnostic failed:", e); }
-
+  item.addEventListener('click', () => {
     // If serve.py token available: try to open original
     if (_serveToken) {
       const originalUrl = serveUrl(name, _serveToken);
@@ -1969,20 +1993,8 @@ function makeThumbnailItem(r) {
       } else {
         window.open(originalUrl, '_blank');
       }
-      return;
     }
-    // Fallback: show info popup
-    const info = [
-      name,
-      r.date || '',
-      r.cc ? CC_FLAG(r.cc) + ' ' + CC_NAME(r.cc) : '',
-      r.score !== null ? 'Score: ' + (r.score*100).toFixed(0) + '%' : ''
-    ].filter(Boolean).join('\n');
-    if (tg && tg.isVersionAtLeast && tg.isVersionAtLeast('6.2')) {
-      tg.showPopup({ title: 'Photo info', message: info, buttons:[{type:'close'}] });
-    } else {
-      alert(info);
-    }
+    // No fallback popup — opening the photo is the only action.
   });
   return item;
 }
@@ -2201,16 +2213,22 @@ async function runSearch(query) {
       const mean = ss.reduce((a,b)=>a+b,0) / ss.length;
       const sigma = Math.sqrt(ss.reduce((s,x)=>s+(x-mean)**2,0) / ss.length);
       const best = scored[0].score;
-      // PRECISION over recall: relevant = both (a) far above the noise floor
-      // AND (b) close to the best match. This filters out near-noise matches
-      // that mean+1σ used to let through (75-85 results on 526 photos).
-      // Tighter: 2.5σ above mean → roughly top 1% of distribution.
-      const floor = Math.max(mean + 2.5 * sigma, best * 0.85);
+      // 1.5σ + 80% of best — middle ground between earlier strict (missed
+      // many sea photos) and earlier loose (let in 83 garbage results).
+      // Garbage-swamp photos are filtered separately via distinctiveness below.
+      const floor = Math.max(mean + 1.5 * sigma, best * 0.80);
       top = scored.filter(r => r.score >= floor);
-      // Safety: if distribution is flat (no real matches), show nothing
       if (sigma < 0.015) top = [];
-      // Generous upper bound — if 50 babies, show 50; cap only to avoid huge renders
       if (top.length > 100) top = top.slice(0, 100);
+    }
+
+    // ── DISTINCTIVENESS filter: drop "swamp" photos where CLIP has no opinion
+    // A photo whose vector gives ~equal cosine to many unrelated concepts is
+    // semantically empty (collage/blurry/cluttered). It will surface for ANY
+    // query at noise-level scores. We pre-computed each photo's distinctiveness
+    // once at load time; here we just gate the results on it.
+    if (_distinctiveness) {
+      top = top.filter(r => _distinctiveness[r.idx] >= _DISTINCT_FLOOR);
     }
     const ms = Math.round(performance.now() - t0);
     console.log('[Pixory]', JSON.stringify(query),
