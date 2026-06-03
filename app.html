@@ -115,20 +115,20 @@ body {
 }
 .search-input {
   flex: 1;
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: #1c2128;
+  border: 1px solid #444c56;
   border-radius: 10px;
-  color: #e6edf3;
-  font-size: 15px;
+  color: #ffffff;
+  font-size: 16px;
   padding: 10px 14px;
   outline: none;
 }
 .search-input:focus { border-color: #58a6ff; }
-.search-input::placeholder { color: #555; }
+.search-input::placeholder { color: #8b949e; }
 .status-bar {
   padding: 6px 16px;
-  font-size: 11px;
-  color: #555;
+  font-size: 12px;
+  color: #8b949e;
   min-height: 24px;
 }
 .results-grid {
@@ -167,7 +167,7 @@ body {
   font-size: 13px; line-height: 1;
   filter: drop-shadow(0 1px 2px rgba(0,0,0,0.8));
 }
-.empty { color: #555; font-size: 14px; text-align: center; padding: 48px 16px; }
+.empty { color: #8b949e; font-size: 14px; text-align: center; padding: 48px 16px; }
 .import-btn-small {
   position: fixed; bottom: 90px; right: 16px;
   background: #21262d; color: #8b949e;
@@ -191,12 +191,12 @@ body {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center;
   background: none; border: none;
-  color: #555; cursor: pointer; gap: 2px;
+  color: #8b949e; cursor: pointer; gap: 2px;
   -webkit-tap-highlight-color: rgba(255,255,255,0.05);
 }
 .tab-btn.tab-active { color: #58a6ff; }
-.tab-icon { font-size: 18px; line-height: 1; }
-.tab-label { font-size: 10px; font-weight: 500; }
+.tab-icon { font-size: 20px; line-height: 1; }
+.tab-label { font-size: 11px; font-weight: 500; }
 
 /* ── Top bars ── */
 .top-bar {
@@ -209,7 +209,7 @@ body {
   display: flex; align-items: center; justify-content: space-between;
 }
 .browse-title { font-size: 17px; font-weight: 600; }
-.photo-count  { font-size: 12px; color: #555; }
+.photo-count  { font-size: 12px; color: #8b949e; }
 
 /* ── Geo chips ── */
 .geo-chips {
@@ -1940,7 +1940,7 @@ function _onSearchChange() {
     statusBar.textContent = `${cachedVecs?.length ?? 0} photos indexed`;
     return;
   }
-  searchTimer = setTimeout(() => runSearch(q), 300);
+  searchTimer = setTimeout(() => runSearch(q), 600);
 }
 searchInput.addEventListener("input", _onSearchChange);
 // keyup: TG WebView fallback for cases where `input` doesn't fire (e.g. IME, paste).
@@ -2031,68 +2031,80 @@ async function runSearch(query) {
         const labels = parseLabels(cachedLabels[i]);
         if (labels.length > 0) {
           // Hard filter: photo labeled as screenshot/document/UI
-          if (labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.45))
+          // Threshold 0.08 = minimum label score stored (min_score in generate_labels)
+          // Any screenshot label present at all → exclude from search results
+          if (labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.08))
             continue;
 
-          // Keyword match against labels
+          // Keyword match: find best label score for each query keyword
+          // Normalize by top label score so relative match strength matters,
+          // not absolute CLIP cosine values (which are always low ~0.08-0.20)
+          const topLabelScore = labels[0][1];  // labels sorted by score desc
           let matched = 0, labelScore = 0;
           for (const kw of kws) {
             let best = 0;
             for (const [lbl, s] of labels)
               if (lbl.includes(kw) || kw.includes(lbl.split(' ')[0]))
-                best = Math.max(best, s);
+                best = Math.max(best, s / Math.max(topLabelScore, 0.01));
             labelScore += best;
-            if (best > 0) matched++;
+            if (best > 0.05) matched++;
           }
           labelScore /= kws.length;
 
-          // No label match AND weak CLIP → exclude entirely
-          if (matched === 0 && clip < 0.22) continue;
+          // No label match → fall through to CLIP-only scoring (don't exclude)
+          if (matched === 0) {
+            scored.push({ score: clip, idx: i, path,
+                          date: cachedDates?.[i] ?? '', _clipOnly: true });
+            continue;
+          }
 
-          // Hybrid: 30% CLIP + 70% label
-          scored.push({ score: 0.30 * clip + 0.70 * labelScore, idx: i, path,
+          // Has label match: hybrid score, label component normalized to [0,1]
+          scored.push({ score: 0.25 * clip + 0.75 * labelScore, idx: i, path,
                         date: cachedDates?.[i] ?? '' });
           continue;
         }
       }
 
-      // CLIP-only path (no labels, or photo has no label data):
-      // Store raw clip score for distribution analysis below
+      // CLIP-only path: no label keyword match, use raw CLIP score
+      // Still apply garbage filter — screenshots pollute every query
+      if (cachedLabels[i]) {
+        const lbls = parseLabels(cachedLabels[i]);
+        if (lbls.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.08)) continue;
+      }
       scored.push({ score: clip, idx: i, path, date: cachedDates?.[i] ?? '', _clipOnly: true });
     }
 
-    // ── iOS-style relevance filtering ─────────────────────────────────────
-    // With labels: scores range 0.05–0.85, threshold at 0.15 is meaningful
-    // CLIP-only: scores range 0.19–0.26 on homogeneous libraries — need to
-    // detect whether the query is actually answerable before showing anything.
+    // ── Relevance filtering: same sigma approach for both paths ───────────
     scored.sort((a, b) => b.score - a.score);
 
     let top = [];
     const labeledResults  = scored.filter(r => !r._clipOnly);
     const clipOnlyResults = scored.filter(r =>  r._clipOnly);
 
-    if (labeledResults.length > 0) {
-      // Label mode: scores 0.05–0.85, clear gap between match/no-match
-      const best = labeledResults[0].score;
-      top = labeledResults
-        .filter(r => r.score >= 0.15 && r.score >= best * 0.55)
-        .slice(0, 30);
+    // Helper: sigma filter — show items above mean + k*sigma, max N
+    function sigmaFilter(results, k, maxN) {
+      if (!results.length) return [];
+      const scores = results.map(r => r.score);
+      const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+      const variance = scores.reduce((s, x) => s + (x - mean) ** 2, 0) / scores.length;
+      const sigma = Math.sqrt(variance);
+      if (sigma < 0.01) return [];  // flat distribution = nothing meaningful
+      const floor = mean + k * sigma;
+      return results.filter(r => r.score >= floor).slice(0, maxN);
+    }
 
-    } else {
-      // CLIP-only mode: no labels, all scores in tight 0.19–0.26 band.
-      // Can't gate on absolute threshold (best is always ~0.24 regardless of query).
-      // Strategy: show top N by relative spread — photos meaningfully above the pack.
-      // Use top-20 mean as baseline; show anything ≥ baseline + 0.5σ, max 12.
-      if (clipOnlyResults.length > 0) {
-        const allScores = clipOnlyResults.map(r => r.score);
-        const mean = allScores.reduce((a, b) => a + b, 0) / allScores.length;
-        const variance = allScores.reduce((s, x) => s + (x - mean) ** 2, 0) / allScores.length;
-        const sigma = Math.sqrt(variance);
-        const floor = mean + sigma * 0.5;  // top ~30% of distribution
-        top = clipOnlyResults.filter(r => r.score >= floor).slice(0, 12);
-        // If sigma is tiny (flat noise, σ < 0.003) → genuinely nothing to show
-        if (sigma < 0.003) top = [];
+    if (labeledResults.length > 0) {
+      // Label matches: normalized scores 0–1, use tight filter (k=0.5)
+      top = sigmaFilter(labeledResults, 0.5, 30);
+      // If sigma filter returns nothing, still show top-3 if they clearly dominate
+      if (top.length === 0 && labeledResults[0].score > 0.3) {
+        top = labeledResults.slice(0, 3);
       }
+    }
+
+    // Always fill with CLIP results if labeled results didn't find anything
+    if (top.length === 0) {
+      top = sigmaFilter(clipOnlyResults, 0.8, 12);
     }
 
     const ms = Math.round(performance.now() - t0);
