@@ -1046,19 +1046,6 @@ async function loadCLIP() {
   }
   await step("AI ready ✓");
 
-  // ── Pre-warm: run one dummy query so first real search is fast ────────────
-  // ONNX WASM JIT-compiles on first inference (~3-4s). Pre-warming here
-  // means the user never waits — search feels instant from the start.
-  try {
-    await step("Warming up… (one-time, ~5 sec)");
-    await window._encodeText("photo");
-    await step("AI ready ✓");
-  } catch(e) {
-    // pre-warm failure is non-fatal — first real search will be slow but work
-    console.warn("[Pixory] Pre-warm failed:", e.message);
-    await step("AI ready ✓");
-  }
-
   // Inspect what the ONNX model expects/returns
   const inputNames  = session.inputNames  || [];
   const outputNames = session.outputNames || [];
@@ -1155,6 +1142,15 @@ async function loadCLIP() {
 
     return vec;
   };
+
+  // ── Pre-warm: now that _encodeText exists, run one dummy query so the
+  // first real search is fast (ONNX WASM JIT-compiles on first inference).
+  try {
+    await window._encodeText("photo");
+    console.log("[Pixory] Pre-warm OK — first search will be fast");
+  } catch(e) {
+    console.warn("[Pixory] Pre-warm failed:", e.message);
+  }
 }
 async function textEmbed(query) {
   if (!window._encodeText) throw new Error("AI encoder not initialized");
@@ -2171,109 +2167,64 @@ async function runSearch(query) {
             "bathroom":["bathroom"],
           };
 
-          // Label cosine scores are ~0.08-0.40. Use them DIRECTLY.
-          // (Previous bug: dividing by labels[0] score exploded scores to 2400%
-          //  when the first label happened to be low, e.g. 1%.)
-          let matched = 0, labelScore = 0;
+          // STRATEGY: rank by live CLIP cosine (proven reliable via diag.py).
+          // Labels from the shard are noisy on collages/screenshots, so we do
+          // NOT use them for ranking — only as a garbage filter below.
+          // A label match is a small confirmation bonus, nothing more.
+          let matched = 0;
           for (const kw of kws) {
             const targets = SYNONYMS[kw] || [kw];
-            let best = 0;
             for (const [lbl, s] of labels) {
               for (const t of targets) {
-                if (lbl.includes(t) || t.includes(lbl.split(' ')[0]))
-                  best = Math.max(best, s);
+                if ((lbl.includes(t) || t.includes(lbl.split(' ')[0])) && s > 0.20)
+                  matched++;
               }
             }
-            labelScore += best;
-            if (best > 0.18) matched++;   // 0.18 = meaningful CLIP label match
           }
-          labelScore /= kws.length;
-
-          // No strong label match → fall through to CLIP-only scoring
-          if (matched === 0) {
-            scored.push({ score: clip, idx: i, path,
-                          date: cachedDates?.[i] ?? '', _clipOnly: true });
+          // Garbage filter: photo dominated by screenshot/document labels
+          if (labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.20))
             continue;
-          }
 
-          // Photo matched the keyword via labels — boost it clearly above
-          // CLIP-only photos. labelScore (~0.18-0.40) + 0.5 base ensures
-          // matched photos always outrank unmatched ones in the final sort.
-          scored.push({ score: 0.5 + labelScore + 0.2 * clip, idx: i, path,
+          // Rank purely by CLIP cosine; tiny bonus if a label confirms the match
+          scored.push({ score: clip + (matched > 0 ? 0.02 : 0), idx: i, path,
                         date: cachedDates?.[i] ?? '' });
           continue;
         }
       }
 
-      // CLIP-only path: no label keyword match, use raw CLIP score
-      // Still apply garbage filter — screenshots pollute every query
+      // No labels for this photo: garbage filter then rank by CLIP cosine
       if (cachedLabels[i]) {
         const lbls = parseLabels(cachedLabels[i]);
-        if (lbls.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.08)) continue;
+        if (lbls.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.20)) continue;
       }
-      scored.push({ score: clip, idx: i, path, date: cachedDates?.[i] ?? '', _clipOnly: true });
+      scored.push({ score: clip, idx: i, path, date: cachedDates?.[i] ?? '' });
     }
 
-    // ── Relevance filtering: same sigma approach for both paths ───────────
+    // ── Relevance filtering by CLIP cosine distribution ───────────────────
+    // All photos now share one score scale (CLIP cosine ~0.10-0.30).
+    // Show photos whose similarity clearly stands out from the pack.
     scored.sort((a, b) => b.score - a.score);
 
     let top = [];
-    const labeledResults  = scored.filter(r => !r._clipOnly);
-    const clipOnlyResults = scored.filter(r =>  r._clipOnly);
-
-    // Helper: sigma filter — show items above mean + k*sigma, max N
-    function sigmaFilter(results, k, maxN) {
-      if (!results.length) return [];
-      const scores = results.map(r => r.score);
-      const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
-      const variance = scores.reduce((s, x) => s + (x - mean) ** 2, 0) / scores.length;
-      const sigma = Math.sqrt(variance);
-      if (sigma < 0.01) return [];  // flat distribution = nothing meaningful
-      const floor = mean + k * sigma;
-      return results.filter(r => r.score >= floor).slice(0, maxN);
+    if (scored.length > 0) {
+      const ss = scored.map(r => r.score);
+      const mean = ss.reduce((a,b)=>a+b,0) / ss.length;
+      const sigma = Math.sqrt(ss.reduce((s,x)=>s+(x-mean)**2,0) / ss.length);
+      // Relevant = clearly above average. k=1.0 keeps genuine matches,
+      // drops the noise floor. No artificial cap — show ALL that qualify.
+      const floor = mean + 1.0 * sigma;
+      top = scored.filter(r => r.score >= floor);
+      // Safety: if distribution is flat (sigma tiny), nothing is relevant
+      if (sigma < 0.015) top = [];
+      // Cap only at a sane upper bound to avoid rendering thousands
+      if (top.length > 200) top = top.slice(0, 200);
     }
-
-    if (labeledResults.length > 0) {
-      // Label matches: normalized scores 0–1, use tight filter (k=0.5)
-      top = sigmaFilter(labeledResults, 0.5, 30);
-      // If sigma filter returns nothing, still show top-3 if they clearly dominate
-      if (top.length === 0 && labeledResults[0].score > 0.3) {
-        top = labeledResults.slice(0, 3);
-      }
-    }
-
-    // Always fill with CLIP results if labeled results didn't find anything
-    if (top.length === 0) {
-      top = sigmaFilter(clipOnlyResults, 0.8, 12);
-    }
-
     const ms = Math.round(performance.now() - t0);
-    // Diagnostic: show label matching details for first scored photo
-    if (scored.length > 0 && kws.length > 0) {
-      const first = scored[0];
-      const firstLabels = parseLabels(cachedLabels[first.idx]);
-      console.log("[Pixory] Top photo labels:", firstLabels.map(([l,s])=>l+"("+(s*100|0)+"%)").join(", "),
-        "| _clipOnly:", first._clipOnly, "| score:", (first.score*100|0)+"%");
-    }
     console.log('[Pixory]', JSON.stringify(query),
       '| hasLabels:', hasLabels, '| kws:', kws,
-      '| top:', top.length,
+      '| results:', top.length,
       '| best:', scored.length ? (scored[0].score*100|0)+'%' : 'n/a',
-      '| labeled:', scored.filter(r=>!r._clipOnly).length,
-      '| clipOnly:', scored.filter(r=>r._clipOnly).length,
       '|', ms+'ms');
-
-    // Warn when operating in degraded CLIP-only mode
-    if (!hasLabels && kws.length > 0 && top.length > 0) {
-      const g = document.getElementById("results-grid");
-      if (g) {
-        const warn = document.createElement('div');
-        warn.style.cssText = 'grid-column:1/-1;padding:8px 12px;background:#2d1f00;' +
-          'border-radius:8px;font-size:11px;color:#f0a030;margin-bottom:6px;';
-        warn.textContent = '⚠️ No semantic labels — re-index for accurate search.';
-        g.prepend(warn);
-      }
-    }
 
     renderResults(top, query);
     if (statusBar) statusBar.textContent = top.length > 0
