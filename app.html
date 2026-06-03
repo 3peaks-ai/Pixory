@@ -2012,11 +2012,16 @@ function _onSearchChange() {
     statusBar.textContent = `${cachedVecs?.length ?? 0} photos indexed`;
     return;
   }
-  // 800ms: user must stop typing before search fires
-  // _searchBusy prevents new search while ONNX is running (4s)
+  // Don't search on a single character — meaningless, wastes 4s of ONNX time
+  if (q.length < 2) {
+    statusBar.textContent = "Keep typing…";
+    return;
+  }
+  // 1200ms debounce: user must clearly pause before search fires.
+  // Re-check value at fire time so a mid-type stale query never runs.
   searchTimer = setTimeout(() => {
-    if (!_searchBusy) runSearch(q);
-  }, 800);
+    if (searchInput.value.trim() === q && !_searchBusy) runSearch(q);
+  }, 1200);
 }
 searchInput.addEventListener("input", _onSearchChange);
 
@@ -2080,34 +2085,16 @@ async function runSearch(query) {
   try {
     const t0  = performance.now();
 
-    // ── Query expansion: encode several CLIP templates and use MAX cosine ──
-    // Single template ("a photo of cat") is noisy. Standard CLIP IR practice:
-    // try multiple natural phrasings, take the max similarity per photo.
-    // This sharply improves precision on personal libraries.
+    // Single template, raw cosine — minimal overhead, ~4s ONNX.
+    // Dehubbify is intentionally NOT applied to search: prior tests on this
+    // library showed it strips the useful signal along with the hub direction.
     const translatedQ = translateQuery(query);
-    const templates = [
-      `a photo of a ${translatedQ}`,
-      `a picture of a ${translatedQ}`,
-      `${translatedQ}`,
-      `a photo of the ${translatedQ}`,
-    ];
-    const qvecs = [];
-    for (const t of templates) {
-      try {
-        const qv = await textEmbed(t);
-        // Dehubbify the query too so it matches dehubbified stored vectors
-        qvecs.push(_dehubbify(qv));
-      } catch(_) {}
-    }
-    if (qvecs.length === 0) qvecs.push(await textEmbed(expandQuery(query)));
+    const qv = await textEmbed(`a photo of a ${translatedQ}`);
     const kws = parseKeywords(translatedQ);
 
     // hasLabels = true only if at least one photo has ≥1 actual label
     const hasLabels = !!(cachedLabels &&
       cachedLabels.some(l => l && l.length > 1 && l[0] > 0));
-
-    // Use dehubbified stored vectors when available (proven to increase spread)
-    const storedVecs = _dehubbed || cachedVecs;
 
     const scored = [];
     for (let i = 0; i < cachedVecs.length; i++) {
@@ -2115,14 +2102,10 @@ async function runSearch(query) {
       // Skip PNGs (screenshots, UI exports — rarely meaningful in photo search)
       if (path.toLowerCase().endsWith('.png')) continue;
 
-      // MAX cosine over all query templates — picks the best phrasing for this image
-      let bestClip = -1;
-      for (const qv of qvecs) {
-        let d = 0;
-        const v = storedVecs[i];
-        for (let k = 0; k < qv.length; k++) d += qv[k] * v[k];
-        if (d > bestClip) bestClip = d;
-      }
+      // Raw cosine against the stored vector
+      let bestClip = 0;
+      const v = cachedVecs[i];
+      for (let k = 0; k < qv.length; k++) bestClip += qv[k] * v[k];
       const hubP = _hubPenalty ? _hubPenalty[i] : 0;
       const clip = bestClip * (1 - hubP);
 
@@ -2247,12 +2230,6 @@ async function runSearch(query) {
       `<div style="grid-column:1/-1;padding:24px;color:#FF453A">Search error: ${err.message}</div>`;
   } finally {
     _searchBusy = false;
-    // If user kept typing while we were busy, run once more with current value
-    const latest = searchInput.value.trim();
-    if (latest && latest !== query) {
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => runSearch(latest), 100);
-    }
   }
 }
 
