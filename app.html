@@ -1948,22 +1948,30 @@ function makeThumbnailItem(r) {
   item.addEventListener('click', async () => {
     // ── DIAGNOSTIC: log this photo's vector alignment ──────────────────────
     try {
-      const idx = r.idx;
-      const v = cachedVecs[idx];
-      const lbls = parseLabels(cachedLabels[idx]);
+      let idx = r.idx;
+      // idx may be stale after sort/filter — verify it points to this photo
+      if (cachedPaths[idx] !== r.path) {
+        idx = cachedPaths.indexOf(r.path);
+      }
+      const v = (idx >= 0) ? cachedVecs[idx] : null;
       console.log("═══ PHOTO VECTOR DIAGNOSTIC ═══");
-      console.log("  File:", name);
-      console.log("  Stored labels:", lbls.map(([l,s])=>l+"("+(s*100|0)+"%)").join(", ") || "none");
-      console.log("  Vector dim:", v.length,
-                  "| norm:", Math.sqrt(v.reduce((s,x)=>s+x*x,0)).toFixed(3));
-      if (window._encodeText) {
-        for (const concept of ["a photo of a cat", "a photo of a baby", "a photo of the sea", "a photo of a dog"]) {
-          const qv = await window._encodeText(concept);
-          let dot = 0; for (let i=0;i<qv.length;i++) dot += qv[i]*v[i];
-          console.log(`  cosine[image, "${concept}"]: ${(dot*100).toFixed(1)}%`);
+      console.log("  File:", name, "| idx:", idx);
+      if (!v) {
+        console.warn("  No vector found for this photo (idx=" + idx + ")");
+      } else {
+        const lbls = (idx >= 0 && cachedLabels[idx]) ? parseLabels(cachedLabels[idx]) : [];
+        console.log("  Stored labels:", lbls.map(([l,s])=>l+"("+(s*100|0)+"%)").join(", ") || "none");
+        console.log("  Vector dim:", v.length,
+                    "| norm:", Math.sqrt(Array.from(v).reduce((s,x)=>s+x*x,0)).toFixed(3));
+        if (window._encodeText) {
+          for (const concept of ["a photo of a cat", "a photo of a baby", "a photo of the sea", "a photo of a dog"]) {
+            const qv = await window._encodeText(concept);
+            let dot = 0; for (let i=0;i<qv.length;i++) dot += qv[i]*v[i];
+            console.log(`  cosine[image, "${concept}"]: ${(dot*100).toFixed(1)}%`);
+          }
+          console.log("  → Matching concept should be clearly highest. If all ~equal,");
+          console.log("    image vectors are misaligned with text space.");
         }
-        console.log("  → A matching concept should be 28-35%. If everything is ~20-24%,");
-        console.log("    image vectors are NOT aligned with text space (re-index needed).");
       }
       console.log("═══════════════════════════════");
     } catch(e) { console.warn("Photo diagnostic failed:", e); }
@@ -1985,8 +1993,11 @@ function makeThumbnailItem(r) {
       r.cc ? CC_FLAG(r.cc) + ' ' + CC_NAME(r.cc) : '',
       r.score !== null ? 'Score: ' + (r.score*100).toFixed(0) + '%' : ''
     ].filter(Boolean).join('\n');
-    if (tg) tg.showPopup({ title: 'Photo info', message: info, buttons:[{type:'close'}] });
-    else alert(info);
+    if (tg && tg.isVersionAtLeast && tg.isVersionAtLeast('6.2')) {
+      tg.showPopup({ title: 'Photo info', message: info, buttons:[{type:'close'}] });
+    } else {
+      alert(info);
+    }
   });
   return item;
 }
