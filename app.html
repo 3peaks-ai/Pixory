@@ -1420,46 +1420,6 @@ async function loadVectorsFromDB() {
   }
   // Preprocess: dehubbify all stored vectors once at load time
   _preprocessVecs();
-
-  // ── SPACE ALIGNMENT SELF-TEST ──────────────────────────────────────────
-  // The core question: are text and image embeddings in the SAME space?
-  // Test: encode several distinct concepts as text, measure how much each
-  // concept's BEST image match exceeds the GLOBAL AVERAGE similarity.
-  // Aligned space → big gap (best match clearly above average).
-  // Broken space → every concept ~same as average (random noise ~0.24).
-  setTimeout(async () => {
-    if (!window._encodeText || !cachedVecs || cachedVecs.length < 10) return;
-    try {
-      const concepts = ["a cat", "a beach", "a car", "a person smiling", "snow"];
-      const lines = [];
-      let totalGap = 0;
-      for (const c of concepts) {
-        const qv = await window._encodeText(c);
-        let best = -1, sum = 0;
-        for (const v of cachedVecs) {
-          let d = 0; for (let i = 0; i < qv.length; i++) d += qv[i]*v[i];
-          if (d > best) best = d;
-          sum += d;
-        }
-        const avg = sum / cachedVecs.length;
-        const gap = best - avg;
-        totalGap += gap;
-        lines.push(`${c}: best=${(best*100|0)}% avg=${(avg*100|0)}% gap=${(gap*100).toFixed(1)}pp`);
-      }
-      const meanGap = totalGap / concepts.length;
-      console.log("═══ SPACE ALIGNMENT TEST ═══");
-      lines.forEach(l => console.log("  " + l));
-      console.log(`  MEAN GAP: ${(meanGap*100).toFixed(1)}pp`);
-      if (meanGap < 0.04) {
-        console.error("  ❌ SPACES NOT ALIGNED — text/image embeddings incompatible.");
-        console.error("  Cause: text_model and vision_model are different CLIP variants,");
-        console.error("  or INT8 quantization broke the text projection. Search cannot work.");
-      } else {
-        console.log("  ✅ Spaces aligned — search should work. gap > 4pp is healthy.");
-      }
-      console.log("════════════════════════════");
-    } catch(e) { console.warn("Self-test failed:", e); }
-  }, 1500);
 }
 
 
