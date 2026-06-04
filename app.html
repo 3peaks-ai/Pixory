@@ -208,7 +208,7 @@ body {
 }
 .results-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 2px;
   padding: 0 0 72px;
   width: 100%;
@@ -346,7 +346,7 @@ body {
   <!-- Top bar: search input OR browse header -->
   <div class="top-bar" id="top-bar-search">
     <img src="pxr.jpeg" class="app-logo" alt="" style="cursor:pointer"
-         onclick="document.getElementById('results-grid').scrollTop=0; document.getElementById('search-input').value=''; document.getElementById('results-grid').innerHTML=''; document.getElementById('status-bar').textContent=(cachedVecs?.length??0)+' photos indexed';"
+         onclick="window.scrollTo({top:0,behavior:'smooth'}); document.getElementById('results-grid').scrollTop=0;"
          onerror="this.style.display='none'">
     <input class="search-input" id="search-input"
            type="search" placeholder="Search your photos…"
@@ -354,7 +354,7 @@ body {
   </div>
   <div class="top-bar top-bar-browse" id="top-bar-browse" style="">
     <img src="pxr.jpeg" class="app-logo" alt="" style="cursor:pointer"
-         onclick="document.getElementById('browse-grid').scrollTop=0; window.scrollTo(0,0);"
+         onclick="window.scrollTo({top:0,behavior:'smooth'}); document.getElementById('browse-grid').scrollTop=0;"
          onerror="this.style.display='none'">
     <span class="browse-title">All Photos</span>
     <span class="photo-count" id="browse-count"></span>
@@ -425,10 +425,13 @@ const tg = window.Telegram?.WebApp;
 if (tg) {
   tg.ready();
   tg.expand();
-  // initData verification: send to our stateless worker for true/false only
-  // ADR-08: bot token never client-side — worker returns verified: bool
-  // For v1 MVP: skip server-side verification, accept Telegram context
-  // TODO: add /verify endpoint on Cloudflare Worker before production
+  // Prevent accidental app closure: Telegram's top-left close/back button
+  // looks like a "back" button to users but actually closes the Mini App.
+  // enableClosingConfirmation() shows a native "Close app?" confirm dialog.
+  // Available since Telegram WebApp 6.2.
+  try {
+    if (tg.enableClosingConfirmation) tg.enableClosingConfirmation();
+  } catch(e) { /* older Telegram — silently skip */ }
 }
 
 
@@ -1223,20 +1226,12 @@ async function loadCLIP() {
   try {
     await window._encodeText("photo");
     for (const anchor of [
-      // Global negatives
       "a photo of shoes on the floor",
       "a photo of a plastic bottle",
       "a screenshot of text on a screen",
       "a photo of furniture in a room",
-      // Gender negatives
       "a photo of a woman", "a photo of a girl",
       "a photo of a man",   "a photo of a boy",
-      // Animal cross-category
-      "a photo of a cat", "a photo of a dog",
-      "a photo of grass", "a photo of a person",
-      "a photo of a road",
-      // Bicycle false-friends
-      "a photo of a person walking",
     ]) {
       try { await window._encodeText(anchor); } catch(_) {}
     }
@@ -2216,25 +2211,23 @@ async function runSearch(query) {
       "a screenshot of text on a screen",
       "a photo of furniture in a room",
     ];
-    // Query-specific negatives: same approach as gender disambiguation,
-    // applied to frequently-confused concept pairs in this library.
+    // Query-specific negatives: gender disambiguation only.
+    // CLIP conflates all people photos regardless of gender — subtracting
+    // the opposite gender embedding pushes the query to the right sex.
+    // We deliberately do NOT add per-concept negatives (dog→cat, bicycle→road
+    // etc.) because: (a) it's O(n_words) and not scalable, (b) it distorts
+    // the sr/best metrics used for "not in library" detection, making
+    // bananas look similar to dog statistically.
     const q = translatedQ.toLowerCase();
-    const QUERY_NEGATIVES = {
-      // Gender — CLIP conflates all people photos
-      'boy':     ["a photo of a woman", "a photo of a girl"],
-      'man':     ["a photo of a woman", "a photo of a girl"],
-      'girl':    ["a photo of a man",   "a photo of a boy"],
-      'woman':   ["a photo of a man",   "a photo of a boy"],
-      'men':     ["a photo of a woman", "a photo of a girl"],
-      'women':   ["a photo of a man",   "a photo of a boy"],
-      // Animals — dog/cat co-occur in family libraries constantly
-      'dog':     ["a photo of a cat", "a photo of grass", "a photo of shoes on a floor"],
-      'cat':     ["a photo of a dog", "a photo of a person"],
-      // Bicycle appears as musule because CLIP associates it with outdoor scenes
-      'bicycle': ["a photo of a person walking", "a photo of grass", "a photo of a road"],
-      'bike':    ["a photo of a person walking", "a photo of grass", "a photo of a road"],
+    const GENDER_NEGATIVES = {
+      'boy':   ["a photo of a woman", "a photo of a girl"],
+      'man':   ["a photo of a woman", "a photo of a girl"],
+      'girl':  ["a photo of a man",   "a photo of a boy"],
+      'woman': ["a photo of a man",   "a photo of a boy"],
+      'men':   ["a photo of a woman", "a photo of a girl"],
+      'women': ["a photo of a man",   "a photo of a boy"],
     };
-    const extraNegatives = QUERY_NEGATIVES[q] || [];
+    const extraNegatives = GENDER_NEGATIVES[q] || [];
     if (USE_NEGATIVE_PROMPTING) {
       for (const anchor of [...NEGATIVE_ANCHORS, ...extraNegatives]) {
         try {
@@ -2382,9 +2375,6 @@ async function runSearch(query) {
       // dog:                    best=0.22, mean=0.165, sigma≈0.017 → sr=3.2
       // Threshold 2.5 sits between them and is immune to sign flips.
       const sr = sigma > 0.005 ? (best - mean) / sigma : 0;
-
-      // Also compute absolute gap best-vs-mean to catch cases where the whole
-      // distribution shifted negative but the gap is real
       const absGap = best - mean;
 
       // Cliff trimmer: cut at a sharp 3pp drop in top-50
@@ -2395,19 +2385,18 @@ async function runSearch(query) {
 
       console.log(`[Pixory] sr=${sr.toFixed(2)} absGap=${(absGap*100).toFixed(1)}pp best=${(best*100).toFixed(1)}% mean=${(mean*100).toFixed(1)}% sigma=${(sigma*100).toFixed(2)}pp cliff@${cliffIdx}`);
 
-      // Reject if: no statistical separation (sr < 2.5) OR degenerate sigma
       if (sigma < 0.008 || sr < 2.5) {
         top = [];
         if (sr < 2.5) console.log(`[Pixory] No results: sr=${sr.toFixed(2)} < 2.5`);
       } else {
-        // Adaptive floor: when sr is high (confident match exists) use a
-        // stricter relative floor to cut the noise tail more aggressively.
-        // dog: sr=3.54 → floor = mean + 1.5σ (cuts shoes/cats below the gap)
-        // baby: sr=2.71 → floor = mean + 1.0σ (gentler, more recall)
-        const kSigma = sr >= 3.0 ? 1.5 : 1.0;
-        const floor = Math.max(mean + kSigma * sigma, best * 0.78);
+        const kSigma = sr >= 3.5 ? 1.8 : sr >= 3.0 ? 1.5 : 1.0;
+        const floor  = Math.max(mean + kSigma * sigma, best * 0.80);
         top = scored.filter(r => r.score >= floor);
         if (cliffIdx < top.length) top = top.slice(0, cliffIdx);
+        // Hard cap: never show more than 20 results when no cliff was found
+        // (cliff@526 means no clear boundary — we can't reliably know where
+        // noise starts; show only the statistically strongest matches)
+        if (cliffIdx === scored.length && top.length > 20) top = top.slice(0, 20);
         if (top.length > 100) top = top.slice(0, 100);
       }
     }
