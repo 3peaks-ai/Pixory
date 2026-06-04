@@ -1157,16 +1157,17 @@ async function loadCLIP() {
   // so pre-warming them removes 4× ONNX cost from the first user query.
   try {
     await window._encodeText("photo");
-    // Pre-encode the negative anchors used in runSearch
+    // Pre-encode negative anchors + null vector — used on EVERY search, free after first
     for (const anchor of [
       "a photo of shoes on the floor",
       "a photo of a plastic bottle",
       "a screenshot of text on a screen",
       "a photo of furniture in a room",
+      "a photo",   // null-query subtraction anchor
     ]) {
       try { await window._encodeText(anchor); } catch(_) {}
     }
-    console.log("[Pixory] Pre-warm OK (1 dummy + 4 negative anchors) — first search will be fast");
+    console.log("[Pixory] Pre-warm OK (1 dummy + 4 negative + 1 null) — first search will be fast");
   } catch(e) {
     console.warn("[Pixory] Pre-warm failed:", e.message);
   }
@@ -2091,35 +2092,29 @@ async function runSearch(query) {
   try {
     const t0  = performance.now();
 
-    // ── FEATURE FLAGS (set both to false to revert to single-template baseline) ─
-    const USE_PROMPT_ENSEMBLE = true;     // average multiple semantic phrasings
-    const USE_NEGATIVE_PROMPTING = true;  // subtract known false-friend embeddings
-    const NEGATIVE_WEIGHT = 0.15;         // weight per negative anchor
+  // ── FEATURE FLAGS ─────────────────────────────────────────────────────────
+  const USE_PROMPT_ENSEMBLE    = true;   // centroid of 2 templates
+  const USE_NEGATIVE_PROMPTING = true;   // subtract known false-friends
+  const USE_NULL_SUBTRACTION   = true;   // subtract "a photo" common component
+  const NEGATIVE_WEIGHT        = 0.15;
+  const NULL_WEIGHT            = 0.40;   // per IT auditor recommendation
 
     const translatedQ = translateQuery(query);
 
-    // ── 1. PROMPT ENSEMBLE — encode several SEMANTIC variants and average ────
-    // Different from the earlier failed query-expansion: we use multiple
-    // *meanings* (not just template wrappings) and take the CENTROID, which
-    // is the classical CLIP zero-shot improvement from the OpenAI paper.
-    // All templates are cached by textEmbed; second search of same query = 0 ms.
+    // ── 1. PROMPT ENSEMBLE ─────────────────────────────────────────────────
     const qv = await (async () => {
       if (!USE_PROMPT_ENSEMBLE) {
         return await textEmbed(`a photo of a ${translatedQ}`);
       }
       const templates = [
         `a photo of a ${translatedQ}`,
-        `a ${translatedQ}`,
         `${translatedQ}`,
-        `a picture of ${translatedQ}`,
-        `a snapshot of ${translatedQ}`,
       ];
       const vecs = [];
       for (const t of templates) {
         try { vecs.push(await textEmbed(t)); } catch(_) {}
       }
       if (vecs.length === 0) return await textEmbed(translatedQ);
-      // Centroid: average then L2-normalize
       const dim = vecs[0].length;
       const out = new Float32Array(dim);
       for (const v of vecs) for (let k = 0; k < dim; k++) out[k] += v[k];
@@ -2130,11 +2125,24 @@ async function runSearch(query) {
       return out;
     })();
 
-    // ── 2. NEGATIVE PROMPTING — subtract known false-friend embeddings ───────
-    // Our shoes-in-dog, bottle-in-boy, screenshot-in-everything errors come
-    // from CLIP co-occurrence bias. We push the query vector AWAY from these
-    // co-occurring concepts so genuine matches surface.
-    // These are anchors we observed in production logs.
+    // ── 2. NULL-QUERY SUBTRACTION (IT Auditor technique #3) ───────────────
+    // "a photo of a bicycle" shares a generic "photo-ness" component with
+    // EVERY photo in the library. Subtracting the embedding of "a photo"
+    // strips this common base-resonance, leaving only the bicycle-specific
+    // signal. This is different from library-mean dehubbify (which was
+    // already tested and rejected) — this operates on the TEXT query, not
+    // on stored image vectors. Not previously tested.
+    if (USE_NULL_SUBTRACTION) {
+      try {
+        const nv = await textEmbed("a photo");
+        for (let k = 0; k < qv.length; k++) qv[k] -= NULL_WEIGHT * nv[k];
+        let n = 0; for (let k = 0; k < qv.length; k++) n += qv[k]*qv[k];
+        n = Math.sqrt(n) + 1e-9;
+        for (let k = 0; k < qv.length; k++) qv[k] /= n;
+      } catch(_) {}
+    }
+
+    // ── 3. NEGATIVE PROMPTING ──────────────────────────────────────────────
     const NEGATIVE_ANCHORS = [
       "a photo of shoes on the floor",
       "a photo of a plastic bottle",
@@ -2148,7 +2156,6 @@ async function runSearch(query) {
           for (let k = 0; k < qv.length; k++) qv[k] -= NEGATIVE_WEIGHT * nv[k];
         } catch(_) {}
       }
-      // Re-normalize the query after subtraction
       let n = 0; for (let k = 0; k < qv.length; k++) n += qv[k]*qv[k];
       n = Math.sqrt(n) + 1e-9;
       for (let k = 0; k < qv.length; k++) qv[k] /= n;
@@ -2268,12 +2275,56 @@ async function runSearch(query) {
       const mean = ss.reduce((a,b)=>a+b,0) / ss.length;
       const sigma = Math.sqrt(ss.reduce((s,x)=>s+(x-mean)**2,0) / ss.length);
       const best = scored[0].score;
-      // Threshold tuned with label-classifier filtering above: most noise is
-      // already filtered out by the label requirement, so we can be looser here.
-      const floor = Math.max(mean + 1.0 * sigma, best * 0.75);
-      top = scored.filter(r => r.score >= floor);
-      if (sigma < 0.015) top = [];
-      if (top.length > 100) top = top.slice(0, 100);
+
+      // ── TECHNIQUE 1: Z-Score Dynamic Cutoff (IT Auditor #1) ─────────────
+      // If the best result doesn't statistically stand out from the noise
+      // floor of this query (Z < 2.5), the concept is likely not in the
+      // library — return nothing instead of fabricated results.
+      const zTop = sigma > 1e-6 ? (best - mean) / sigma : 0;
+
+      // ── TECHNIQUE 2: Cliff Detection (IT Auditor #2 — fixed) ─────────────
+      // WRONG: comparing 1st vs Nth blindly fails when there are 500 genuine
+      // matches (all scores are close together → looks like "flat noise").
+      // RIGHT: find where the score distribution has a SHARP DROP-OFF.
+      // If the top results are all tightly clustered then separate from a
+      // lower plateau, there IS a cliff — we just need to find it.
+      //
+      // Algorithm: look at consecutive score gaps in the sorted list.
+      // Find the largest gap in the top-50. If that gap is bigger than
+      // CLIFF_GAP_MIN we cut there. If no big gap exists, there's no cliff
+      // and we keep all results (500 babies stays 500 babies).
+      const CLIFF_GAP_MIN = 0.03;  // 3pp gap between consecutive scores = cliff
+      let cliffIdx = scored.length; // default: no cliff found, keep all
+      const checkLen = Math.min(scored.length, 50);
+      for (let i = 1; i < checkLen; i++) {
+        const gap = scored[i-1].score - scored[i].score;
+        if (gap >= CLIFF_GAP_MIN) { cliffIdx = i; break; }
+      }
+      const cliffGap = cliffIdx < scored.length
+        ? scored[cliffIdx-1].score - scored[cliffIdx].score : 0;
+      console.log(`[Pixory] cliff at idx=${cliffIdx} gap=${(cliffGap*100).toFixed(1)}pp`);
+
+      // Log diagnostics — calibrate thresholds from real queries before hardening
+      console.log(`[Pixory] z-top=${zTop.toFixed(2)} cliff-gap=${(cliffGap*100).toFixed(1)}pp mean=${(mean*100).toFixed(1)}% sigma=${(sigma*100).toFixed(2)}pp best=${(best*100).toFixed(1)}%`);
+
+      const Z_THRESHOLD    = 2.5;
+
+      if (sigma < 0.012) {
+        // Degenerate distribution — nothing relevant
+        top = [];
+      } else if (zTop < Z_THRESHOLD) {
+        top = [];
+        console.log(`[Pixory] Rejected by Z-score: ${zTop.toFixed(2)} < ${Z_THRESHOLD}`);
+      } else {
+        // Standard relative floor
+        const floor = Math.max(mean + 1.0 * sigma, best * 0.75);
+        top = scored.filter(r => r.score >= floor);
+        // Cliff: if a sharp drop was found, trim at that point
+        // (500 babies are kept; but if score drops from 0.24→0.17 at idx 8,
+        // we show 8, not 500 noise photos after the cliff)
+        if (cliffIdx < top.length) top = top.slice(0, cliffIdx);
+        if (top.length > 100) top = top.slice(0, 100);
+      }
     }
     const ms = Math.round(performance.now() - t0);
     console.log('[Pixory]', JSON.stringify(query),
