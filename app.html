@@ -153,6 +153,14 @@ body {
   max-width: 340px;
   width: 100%;
 }
+#import-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px 80px;
+  min-height: 60vh;
+}
 .import-card h2 { font-size: 18px; margin-bottom: 8px; }
 .import-card p  { color: #ccc; font-size: 13px; line-height: 1.5; }
 .import-steps   { text-align: left; margin: 16px 0; }
@@ -1225,13 +1233,15 @@ async function loadCLIP() {
   // so pre-warming them removes 4× ONNX cost from the first user query.
   try {
     await window._encodeText("photo");
+    // Pre-warm only the 4 global negative anchors used on EVERY search.
+    // Gender anchors (woman/man/boy/girl) are lazy-cached on first use —
+    // pre-warming all 8 was adding 16s to startup for users who may never
+    // search by gender.
     for (const anchor of [
       "a photo of shoes on the floor",
       "a photo of a plastic bottle",
       "a screenshot of text on a screen",
       "a photo of furniture in a room",
-      "a photo of a woman", "a photo of a girl",
-      "a photo of a man",   "a photo of a boy",
     ]) {
       try { await window._encodeText(anchor); } catch(_) {}
     }
@@ -2388,15 +2398,17 @@ async function runSearch(query) {
       if (sigma < 0.008 || sr < 2.5) {
         top = [];
         if (sr < 2.5) console.log(`[Pixory] No results: sr=${sr.toFixed(2)} < 2.5`);
+      } else if (absGap < 0.08) {
+        // absGap < 8pp: best result barely stands out from mean in absolute terms.
+        // Calibrated against real data: banana(7.4pp)=garbage, baby(12.5pp)=real.
+        // This catches cases where sr looks OK but the actual gap is tiny.
+        top = [];
+        console.log(`[Pixory] No results: absGap ${(absGap*100).toFixed(1)}pp < 8pp`);
       } else {
         const kSigma = sr >= 3.5 ? 1.8 : sr >= 3.0 ? 1.5 : 1.0;
         const floor  = Math.max(mean + kSigma * sigma, best * 0.80);
         top = scored.filter(r => r.score >= floor);
         if (cliffIdx < top.length) top = top.slice(0, cliffIdx);
-        // Hard cap: never show more than 20 results when no cliff was found
-        // (cliff@526 means no clear boundary — we can't reliably know where
-        // noise starts; show only the statistically strongest matches)
-        if (cliffIdx === scored.length && top.length > 20) top = top.slice(0, 20);
         if (top.length > 100) top = top.slice(0, 100);
       }
     }
