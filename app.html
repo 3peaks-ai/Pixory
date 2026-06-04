@@ -954,7 +954,15 @@ async function loadCLIP() {
   const yieldUI = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
   const step = async (msg) => {
     console.log("[Pixory]", msg);
-    setLoading(msg);
+    // If Browse is already visible (state-ready), update status-bar only —
+    // don't overwrite the whole UI with the loading overlay.
+    const isReady = document.getElementById("state-ready")?.classList.contains("active");
+    if (isReady) {
+      const sb = document.getElementById("status-bar");
+      if (sb) sb.textContent = msg;
+    } else {
+      setLoading(msg);
+    }
     await yieldUI();
   };
 
@@ -1403,41 +1411,34 @@ async function init() {
     setLoading(`Loading ${count} photos…`);
     await loadVectorsFromDB();
 
-    setLoading("Analyzing photo collection…");
+    setLoading("Analysing photo collection…");
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
     try { detectHubs(); } catch(e) { console.warn("[Pixory] hub detect failed:", e); }
 
-    // Show Browse immediately — search tab shows "Loading AI model…" placeholder
+    // ── Show Browse immediately ────────────────────────────────────────────
+    // Switch to ready state and render Browse BEFORE loading the AI model.
+    // loadCLIP is kicked off via setTimeout so the browser paints the Browse
+    // grid first (setState → repaint → setTimeout fires → loadCLIP starts).
     setState("state-ready");
     try { startBrowse(); switchTab('browse'); } catch(e) { console.error('browse init:', e); }
 
-    // Disable search input until model is ready
+    // Disable search input with a placeholder while model loads in background
     const si = document.getElementById("search-input");
-    if (si) {
-      si.disabled = true;
-      si.placeholder = "Loading AI model…";
-    }
+    if (si) { si.disabled = true; si.placeholder = "Loading AI… (browse freely)"; }
 
-    // Load CLIP in background — UI remains responsive
-    setLoading("Loading AI model…");
+    // Yield to browser paint, then start model load
+    await new Promise(r => setTimeout(r, 50));
+
     try {
       await loadCLIP();
     } catch(e) {
       console.error("[Pixory] CLIP load failed:", e);
-      if (si) si.placeholder = "AI model failed to load";
+      if (si) { si.placeholder = "AI model failed — reload to retry"; }
       return;
     }
 
-    // Model ready — unlock search
-    if (si) {
-      si.disabled = false;
-      si.placeholder = "Search your photos…";
-    }
-    // Clear any loading overlay that might still be shown
-    const sb = document.getElementById("status-bar");
-    if (sb && sb.textContent.includes("Loading AI")) {
-      sb.textContent = `${count} photos indexed`;
-    }
+    // Unlock search
+    if (si) { si.disabled = false; si.placeholder = "Search your photos…"; }
 
     // If IDB has no labels → old index, needs re-import
     const hasAnyLabels = cachedLabels && cachedLabels.some(l => l && l[0] > 0);
