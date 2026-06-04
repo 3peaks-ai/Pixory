@@ -208,14 +208,14 @@ body {
 }
 .results-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 2px;
   padding: 0 0 72px;
   width: 100%;
 }
 .result-item {
   aspect-ratio: 1;
-  background: #161b22;
+  background: #1c2128;
   overflow: hidden;
   cursor: pointer;
   position: relative;
@@ -224,6 +224,7 @@ body {
   width: 100%; height: 100%;
   object-fit: cover;
   display: block;
+  /* No brightness filter — show photos at full brightness */
 }
 .result-item .score {
   position: absolute; bottom: 4px; right: 4px;
@@ -337,38 +338,24 @@ body {
 </div>
 
 <!-- STATE: Import -->
-<div id="state-import">
-  <div class="import-card">
-    <h2>📁 Import your library</h2>
-    <p>Your photo index was not found.<br>Generate it on your PC first.</p>
-    <ol class="import-steps">
-      <li>On PC: run <code>python indexer.py --photos /your/photos</code></li>
-      <li>Copy <code>vectors.bin</code> to your phone</li>
-      <li>Tap Import below</li>
-    </ol>
-    <input type="file" id="file-input" accept=".bin">
-    <button class="btn-primary" onclick="document.getElementById('file-input').click()">
-      📂 Select index file
-    </button>
-    <button id="btn-cancel-import" class="btn-cancel" style="display:none"
-            onclick="setState('state-ready')">
-      ← Back to search
-    </button>
-  </div>
-</div>
+<div id="state-import" style="display:none"><!-- unused: import moved into state-ready tab --></div>
 
-<!-- STATE: Search + Browse (tab bar) -->
+<!-- STATE: Search + Browse + Import (unified tab bar) -->
 <div id="state-ready">
 
   <!-- Top bar: search input OR browse header -->
   <div class="top-bar" id="top-bar-search">
-    <img src="pxr.jpeg" class="app-logo" alt="" onerror="this.style.display='none'">
+    <img src="pxr.jpeg" class="app-logo" alt="" style="cursor:pointer"
+         onclick="document.getElementById('results-grid').scrollTop=0; document.getElementById('search-input').value=''; document.getElementById('results-grid').innerHTML=''; document.getElementById('status-bar').textContent=(cachedVecs?.length??0)+' photos indexed';"
+         onerror="this.style.display='none'">
     <input class="search-input" id="search-input"
            type="search" placeholder="Search your photos…"
            autocomplete="off" autocorrect="off" spellcheck="false">
   </div>
   <div class="top-bar top-bar-browse" id="top-bar-browse" style="">
-    <img src="pxr.jpeg" class="app-logo" alt="" onerror="this.style.display='none'">
+    <img src="pxr.jpeg" class="app-logo" alt="" style="cursor:pointer"
+         onclick="document.getElementById('browse-grid').scrollTop=0; window.scrollTo(0,0);"
+         onerror="this.style.display='none'">
     <span class="browse-title">All Photos</span>
     <span class="photo-count" id="browse-count"></span>
   </div>
@@ -388,7 +375,24 @@ body {
   <div class="results-grid" id="browse-grid" style="display:none"></div>
   <div id="browse-sentinel" style="height:1px;display:none"></div>
 
-  <!-- Tab bar -->
+  <!-- Import panel (now a tab, not a separate state) -->
+  <div id="import-panel" style="display:none">
+    <div class="import-card">
+      <h2>📁 Import your library</h2>
+      <p>Generate a photo index on your PC, then import it here.</p>
+      <ol class="import-steps">
+        <li>On PC: run <code>python indexer.py --photos /your/photos</code></li>
+        <li>Copy <code>vectors_index.bin</code> to your phone</li>
+        <li>Tap "Select index file" below</li>
+      </ol>
+      <input type="file" id="file-input" accept=".bin">
+      <button class="btn-primary" onclick="document.getElementById('file-input').click()">
+        📂 Select index file
+      </button>
+    </div>
+  </div>
+
+  <!-- Tab bar — always visible in state-ready -->
   <div class="tab-bar">
     <button class="tab-btn tab-active" id="tab-search" onclick="switchTab('search')">
       <span class="tab-icon">🔍</span>
@@ -398,7 +402,7 @@ body {
       <span class="tab-icon">🖼️</span>
       <span class="tab-label">Browse</span>
     </button>
-    <button class="tab-btn" id="tab-reimport" onclick="showImport()">
+    <button class="tab-btn" id="tab-import" onclick="switchTab('import')">
       <span class="tab-icon">📥</span>
       <span class="tab-label">Import</span>
     </button>
@@ -1219,15 +1223,20 @@ async function loadCLIP() {
   try {
     await window._encodeText("photo");
     for (const anchor of [
+      // Global negatives
       "a photo of shoes on the floor",
       "a photo of a plastic bottle",
       "a screenshot of text on a screen",
       "a photo of furniture in a room",
-      "a photo",
-      "a photo of a woman",
-      "a photo of a girl",
-      "a photo of a man",
-      "a photo of a boy",
+      // Gender negatives
+      "a photo of a woman", "a photo of a girl",
+      "a photo of a man",   "a photo of a boy",
+      // Animal cross-category
+      "a photo of a cat", "a photo of a dog",
+      "a photo of grass", "a photo of a person",
+      "a photo of a road",
+      // Bicycle false-friends
+      "a photo of a person walking",
     ]) {
       try { await window._encodeText(anchor); } catch(_) {}
     }
@@ -1943,11 +1952,13 @@ function switchTab(tab) {
   _currentTab = tab;
   document.getElementById('tab-search').classList.toggle('tab-active', tab === 'search');
   document.getElementById('tab-browse').classList.toggle('tab-active', tab === 'browse');
-  document.getElementById('top-bar-search').style.display = tab === 'search' ? '' : 'none';
-  document.getElementById('top-bar-browse').style.display = tab === 'browse' ? '' : 'none';
-  document.getElementById('results-grid').style.display   = tab === 'search' ? '' : 'none';
-  document.getElementById('browse-grid').style.display    = tab === 'browse' ? '' : 'none';
-  document.getElementById('status-bar').style.display     = tab === 'search' ? '' : 'none';
+  document.getElementById('tab-import').classList.toggle('tab-active', tab === 'import');
+  document.getElementById('top-bar-search').style.display  = tab === 'search' ? '' : 'none';
+  document.getElementById('top-bar-browse').style.display  = tab === 'browse' ? '' : 'none';
+  document.getElementById('results-grid').style.display    = tab === 'search' ? '' : 'none';
+  document.getElementById('browse-grid').style.display     = tab === 'browse' ? '' : 'none';
+  document.getElementById('import-panel').style.display    = tab === 'import' ? '' : 'none';
+  document.getElementById('status-bar').style.display      = tab === 'search' ? '' : 'none';
   if (tab === 'browse') startBrowse();
 }
 
@@ -2016,7 +2027,6 @@ function makeThumbnailItem(r) {
     const isBlob = url.startsWith('blob:');
     inner = `<img src="${url}"
       style="width:100%;height:100%;object-fit:cover;display:block;"
-      loading="lazy"
       onload="if(this.src.startsWith('blob:'))URL.revokeObjectURL && (URL.revokeObjectURL && URL.revokeObjectURL(this.src))"
       onerror="if(this.src.startsWith('blob:'))URL.revokeObjectURL && (URL.revokeObjectURL && URL.revokeObjectURL(this.src));this.style.display='none'">`;
   } else {
@@ -2206,19 +2216,25 @@ async function runSearch(query) {
       "a screenshot of text on a screen",
       "a photo of furniture in a room",
     ];
-    // Query-specific anchors: gender disambiguation.
-    // CLIP conflates 'man'/'boy' with any person photo (heavy gender bias).
-    // Subtracting the opposite gender pushes the query toward the right sex.
+    // Query-specific negatives: same approach as gender disambiguation,
+    // applied to frequently-confused concept pairs in this library.
     const q = translatedQ.toLowerCase();
-    const GENDER_NEGATIVES = {
-      'boy':   ["a photo of a woman", "a photo of a girl"],
-      'man':   ["a photo of a woman", "a photo of a girl"],
-      'girl':  ["a photo of a man",   "a photo of a boy"],
-      'woman': ["a photo of a man",   "a photo of a boy"],
-      'men':   ["a photo of a woman", "a photo of a girl"],
-      'women': ["a photo of a man",   "a photo of a boy"],
+    const QUERY_NEGATIVES = {
+      // Gender — CLIP conflates all people photos
+      'boy':     ["a photo of a woman", "a photo of a girl"],
+      'man':     ["a photo of a woman", "a photo of a girl"],
+      'girl':    ["a photo of a man",   "a photo of a boy"],
+      'woman':   ["a photo of a man",   "a photo of a boy"],
+      'men':     ["a photo of a woman", "a photo of a girl"],
+      'women':   ["a photo of a man",   "a photo of a boy"],
+      // Animals — dog/cat co-occur in family libraries constantly
+      'dog':     ["a photo of a cat", "a photo of grass", "a photo of shoes on a floor"],
+      'cat':     ["a photo of a dog", "a photo of a person"],
+      // Bicycle appears as musule because CLIP associates it with outdoor scenes
+      'bicycle': ["a photo of a person walking", "a photo of grass", "a photo of a road"],
+      'bike':    ["a photo of a person walking", "a photo of grass", "a photo of a road"],
     };
-    const extraNegatives = GENDER_NEGATIVES[q] || [];
+    const extraNegatives = QUERY_NEGATIVES[q] || [];
     if (USE_NEGATIVE_PROMPTING) {
       for (const anchor of [...NEGATIVE_ANCHORS, ...extraNegatives]) {
         try {
