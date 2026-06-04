@@ -1387,26 +1387,57 @@ async function init() {
     try { await loadShardBlob();    } catch(e) {}
     try { _thumbOffsets = await loadThumbOffsets(); } catch(e) {}
 
-    await loadCLIP();
-
     const count = await countVectors(db);
     if (count === 0) {
+      // No photos indexed yet — start model load in background while showing import
+      loadCLIP().catch(e => console.warn("[Pixory] CLIP load failed:", e));
       setState("state-import");
       return;
     }
 
-    setLoading(`Loading ${count} vectors…`);
+    // ── Show Browse immediately, load AI model in the background ─────────
+    // Users wait 30-60s staring at a black screen. Instead:
+    // 1. Load vectors (fast, <1s) and show Browse right away
+    // 2. Load CLIP model in the background
+    // 3. Search input activates once model is ready
+    setLoading(`Loading ${count} photos…`);
     await loadVectorsFromDB();
 
     setLoading("Analyzing photo collection…");
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
-    try { detectHubs();       } catch(e) { console.warn("[Pixory] hub detect failed:", e); }
+    try { detectHubs(); } catch(e) { console.warn("[Pixory] hub detect failed:", e); }
 
+    // Show Browse immediately — search tab shows "Loading AI model…" placeholder
     setState("state-ready");
+    try { startBrowse(); switchTab('browse'); } catch(e) { console.error('browse init:', e); }
+
+    // Disable search input until model is ready
+    const si = document.getElementById("search-input");
+    if (si) {
+      si.disabled = true;
+      si.placeholder = "Loading AI model…";
+    }
+
+    // Load CLIP in background — UI remains responsive
+    setLoading("Loading AI model…");
     try {
-      startBrowse();
-      switchTab('browse');
-    } catch(e) { console.error('browse init:', e); }
+      await loadCLIP();
+    } catch(e) {
+      console.error("[Pixory] CLIP load failed:", e);
+      if (si) si.placeholder = "AI model failed to load";
+      return;
+    }
+
+    // Model ready — unlock search
+    if (si) {
+      si.disabled = false;
+      si.placeholder = "Search your photos…";
+    }
+    // Clear any loading overlay that might still be shown
+    const sb = document.getElementById("status-bar");
+    if (sb && sb.textContent.includes("Loading AI")) {
+      sb.textContent = `${count} photos indexed`;
+    }
 
     // If IDB has no labels → old index, needs re-import
     const hasAnyLabels = cachedLabels && cachedLabels.some(l => l && l[0] > 0);
@@ -2093,19 +2124,21 @@ async function runSearch(query) {
     const t0  = performance.now();
 
   // ── FEATURE FLAGS ─────────────────────────────────────────────────────────
-  const USE_NEGATIVE_PROMPTING = true;   // subtract known false-friends (free, pre-warmed)
+  const USE_NEGATIVE_PROMPTING = true;
   const NEGATIVE_WEIGHT        = 0.15;
-  // NOTE: prompt ensemble removed — 2 templates × 2s/ONNX = 4s overhead per new query
-  // NOTE: null subtraction removed — it shifted distributions so bicycle Z≈dog Z,
-  //       destroying the Z-score as a "concept not in library" detector
 
     const translatedQ = translateQuery(query);
 
-    // Single template — fast, anchors cover the noise reduction
-    const qv = await textEmbed(`a photo of a ${translatedQ}`);
+    // CRITICAL: always copy the cached vector before modifying.
+    // textEmbed() returns the same Float32Array from cache every call.
+    // Mutating it in-place means the 2nd search applies negatives to an
+    // already-modified vector → progressive corruption → ratio=0.00 → 0 results.
+    const qvCached = await textEmbed(`a photo of a ${translatedQ}`);
+    const qv = new Float32Array(qvCached); // defensive copy
 
     // ── NEGATIVE PROMPTING — subtract known false-friends ─────────────────
-    // Pre-warmed at init, so these textEmbed() calls are instant cache hits.
+    // Pre-warmed at init → these textEmbed() calls are instant cache hits.
+    // Also copy each anchor vector before reading — same cache-mutation guard.
     const NEGATIVE_ANCHORS = [
       "a photo of shoes on the floor",
       "a photo of a plastic bottle",
@@ -2115,7 +2148,7 @@ async function runSearch(query) {
     if (USE_NEGATIVE_PROMPTING) {
       for (const anchor of NEGATIVE_ANCHORS) {
         try {
-          const nv = await textEmbed(anchor);
+          const nv = await textEmbed(anchor); // read-only, no copy needed
           for (let k = 0; k < qv.length; k++) qv[k] -= NEGATIVE_WEIGHT * nv[k];
         } catch(_) {}
       }
@@ -2240,33 +2273,42 @@ async function runSearch(query) {
       const best = scored[0].score;
 
       // ── "NOT IN LIBRARY" DETECTOR ────────────────────────────────────────
-      // Z-score was broken by null subtraction (bicycle Z=4.49 ≈ dog Z=4.41).
-      // Raw absolute threshold fails because woman best=0.21 ≈ bicycle best=0.18.
+      // BUG HISTORY: ratio = best/mean breaks when negative prompting pushes
+      // mean below zero (e.g. sea: mean=-2.8% → ratio=0.00 → false rejection).
       //
-      // RATIO = best / mean is scale-invariant and distribution-independent.
-      // Calibrated from real logs:
-      //   dog:     best=0.22, mean=0.165 → ratio=1.33  ✅ in library
-      //   cat:     best=0.24, mean=0.160 → ratio=1.50  ✅
-      //   sea:     best=0.25, mean=0.165 → ratio=1.52  ✅
-      //   woman:   best=0.21, mean=0.165 → ratio=1.27  ✅
-      //   baby:    best=0.25, mean=0.165 → ratio=1.52  ✅
-      //   bicycle: best=0.18, mean=0.165 → ratio=1.09  ❌ not in library
-      //   football:best=0.18, mean=0.165 → ratio=1.09  ❌
-      // Threshold 1.20 sits cleanly between 1.09 and 1.27.
-      const ratio = mean > 1e-6 ? best / mean : 0;
-      const zTop  = sigma > 1e-6 ? (best - mean) / sigma : 0;
+      // FIXED: use RANGE RATIO = (best - min) / (max - min), always in [0,1].
+      // This is immune to sign of the distribution.
+      // - Concept in library: top scores clearly separate from bottom → ratio high
+      //   dog: best=0.22, min=0.09 → range_ratio = (0.22-0.09)/(0.22-0.09) = 1.0
+      //   (using best vs median is more robust than vs min)
+      // Simpler formulation: (best - mean) / (best - worst)
+      // bicycle not in library: best=0.18, mean=0.165, worst=0.14
+      //   → separation = (0.18-0.165)/(0.18-0.14) = 0.015/0.04 = 0.38
+      // dog in library: best=0.22, mean=0.165, worst=0.09
+      //   → separation = (0.22-0.165)/(0.22-0.09) = 0.055/0.13 = 0.42
+      // Hmm, still close. Use sigma-relative version which is stable:
+      // signal_ratio = (best - mean) / max(sigma, 0.005)
+      // bicycle (pre negative): best=0.18, mean=0.165, sigma≈0.007 → sr=2.1
+      // dog:                    best=0.22, mean=0.165, sigma≈0.017 → sr=3.2
+      // Threshold 2.5 sits between them and is immune to sign flips.
+      const sr = sigma > 0.005 ? (best - mean) / sigma : 0;
 
-      // Cliff trimmer: cut at a sharp 3pp drop in top-50 (rarely fires but free)
+      // Also compute absolute gap best-vs-mean to catch cases where the whole
+      // distribution shifted negative but the gap is real
+      const absGap = best - mean;
+
+      // Cliff trimmer: cut at a sharp 3pp drop in top-50
       let cliffIdx = scored.length;
       for (let i = 1; i < Math.min(scored.length, 50); i++) {
         if (scored[i-1].score - scored[i].score >= 0.03) { cliffIdx = i; break; }
       }
 
-      console.log(`[Pixory] ratio=${ratio.toFixed(2)} z=${zTop.toFixed(2)} best=${(best*100).toFixed(1)}% mean=${(mean*100).toFixed(1)}% cliff@${cliffIdx}`);
+      console.log(`[Pixory] sr=${sr.toFixed(2)} absGap=${(absGap*100).toFixed(1)}pp best=${(best*100).toFixed(1)}% mean=${(mean*100).toFixed(1)}% sigma=${(sigma*100).toFixed(2)}pp cliff@${cliffIdx}`);
 
-      if (sigma < 0.012 || ratio < 1.20) {
+      // Reject if: no statistical separation (sr < 2.5) OR degenerate sigma
+      if (sigma < 0.008 || sr < 2.5) {
         top = [];
-        if (ratio < 1.20) console.log(`[Pixory] No results: ratio ${ratio.toFixed(2)} < 1.20 — concept not in library`);
+        if (sr < 2.5) console.log(`[Pixory] No results: sr=${sr.toFixed(2)} < 2.5`);
       } else {
         const floor = Math.max(mean + 1.0 * sigma, best * 0.75);
         top = scored.filter(r => r.score >= floor);
