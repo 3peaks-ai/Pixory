@@ -1931,16 +1931,51 @@ function makeThumbnailItem(r) {
   item.innerHTML = inner + scoreTag + dateTag + geoTag;
 
   item.addEventListener('click', () => {
-    // If serve.py token available: try to open original
-    if (_serveToken) {
-      const originalUrl = serveUrl(name, _serveToken);
-      if (tg) {
-        tg.openLink(originalUrl);
-      } else {
-        window.open(originalUrl, '_blank');
-      }
+    // Find this photo's full path in the cached arrays (more reliable than r.path
+    // after sort/filter)
+    let fullPath = r.path || name;
+    let idx = r.idx;
+    if (cachedPaths && cachedPaths[idx] !== r.path) {
+      idx = cachedPaths.indexOf(r.path);
     }
-    // No fallback popup — opening the photo is the only action.
+    if (idx >= 0 && cachedPaths[idx]) fullPath = cachedPaths[idx];
+
+    // Two-stage UX: first click reveals an info overlay (so the user can read
+    // and copy the filename); a second click on the overlay opens the original.
+    // This avoids Telegram showPopup (broken on v6.0) and avoids losing context
+    // by leaving the page.
+    if (item.dataset.expanded === '1') {
+      if (_serveToken) {
+        const originalUrl = serveUrl(name, _serveToken);
+        if (tg && tg.openLink) tg.openLink(originalUrl);
+        else window.open(originalUrl, '_blank');
+      }
+      return;
+    }
+    // Close any other open overlay first
+    document.querySelectorAll('.result-item[data-expanded="1"]').forEach(el => {
+      el.dataset.expanded = '';
+      const o = el.querySelector('.info-overlay'); if (o) o.remove();
+    });
+    item.dataset.expanded = '1';
+    const overlay = document.createElement('div');
+    overlay.className = 'info-overlay';
+    overlay.style.cssText =
+      'position:absolute;inset:0;background:rgba(0,0,0,0.85);' +
+      'display:flex;flex-direction:column;justify-content:center;' +
+      'padding:6px;color:#fff;font-size:10px;line-height:1.3;' +
+      'word-break:break-all;text-align:left;cursor:pointer;';
+    const scoreLine = r.score !== null
+      ? `<div style="color:#58a6ff;font-weight:600;margin-bottom:2px">${(r.score*100).toFixed(0)}%</div>`
+      : '';
+    overlay.innerHTML =
+      scoreLine +
+      `<div style="font-weight:600;margin-bottom:2px">${name}</div>` +
+      (r.date ? `<div style="color:#aaa">${r.date}</div>` : '') +
+      (r.cc ? `<div style="color:#aaa">${CC_FLAG(r.cc)} ${CC_NAME(r.cc) || r.cc}</div>` : '') +
+      `<div style="color:#888;font-size:9px;margin-top:4px;opacity:0.9">${fullPath}</div>` +
+      `<div style="color:#58a6ff;font-size:9px;margin-top:6px">tap again to open</div>`;
+    item.appendChild(overlay);
   });
   return item;
 }
