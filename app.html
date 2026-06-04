@@ -18,6 +18,81 @@
       ort.env.wasm.numThreads = 1;
     }
   </script>
+
+  <!-- ── ONNX Worker (inline Blob) ──────────────────────────────────────────
+       Runs ONNX session.create() and session.run() off the main thread so
+       the 30s WASM compilation doesn't block IntersectionObserver / scroll.
+       Protocol:
+         main → worker: {type:'init', modelBuffer, wasmPaths, ortUrl}
+         main → worker: {type:'run', id, inputIds, attMask}
+         worker → main: {type:'ready'}
+         worker → main: {type:'result', id, vec}  (Float32Array)
+         worker → main: {type:'error', id?, msg}
+  ──────────────────────────────────────────────────────────────────────── -->
+  <script id="onnx-worker-src" type="text/plain">
+  // Loaded as a Blob URL by createOnnxWorker() below
+  importScripts(__ORT_URL__);
+
+  let session = null;
+  let inputNames = [];
+  let bestOutputKey = null;
+
+  self.onmessage = async (e) => {
+    const msg = e.data;
+    if (msg.type === 'init') {
+      try {
+        ort.env.wasm.wasmPaths = msg.wasmPaths;
+        ort.env.wasm.numThreads = 1;
+        try {
+          session = await ort.InferenceSession.create(msg.modelBuffer,
+            { executionProviders: ['wasm'] });
+        } catch(_) {
+          ort.env.wasm.simd = false;
+          session = await ort.InferenceSession.create(msg.modelBuffer,
+            { executionProviders: ['wasm'] });
+        }
+        inputNames = session.inputNames || [];
+        self.postMessage({ type: 'ready', inputNames,
+                           outputNames: session.outputNames || [] });
+      } catch(err) {
+        self.postMessage({ type: 'error', msg: err.message });
+      }
+    } else if (msg.type === 'run') {
+      try {
+        const { id, inputIds, attMask } = msg;
+        const n = inputIds.length;
+        const feeds = {};
+        for (const name of inputNames) {
+          if (name === 'input_ids' || name === 'tokens' || name === 'ids')
+            feeds[name] = new ort.Tensor('int64', BigInt64Array.from(inputIds, BigInt), [1,n]);
+          else if (name === 'attention_mask' || name === 'mask')
+            feeds[name] = new ort.Tensor('int64', BigInt64Array.from(attMask, BigInt), [1,n]);
+        }
+        if (Object.keys(feeds).length === 0)
+          feeds.input_ids = new ort.Tensor('int64', BigInt64Array.from(inputIds, BigInt), [1,n]);
+        const out = await session.run(feeds);
+        // Pick best output key once
+        if (!bestOutputKey) {
+          const prio = ['text_embeds','pooler_output','last_hidden_state'];
+          bestOutputKey = prio.find(p => out[p] && out[p].dims.length === 2)
+            || Object.keys(out).find(k => out[k].dims.length === 2)
+            || Object.keys(out)[0];
+        }
+        let raw = out[bestOutputKey].data;
+        // If 3D (seq output), take EOS token
+        if (out[bestOutputKey].dims.length === 3) {
+          const mask = attMask; const d = out[bestOutputKey].dims[2];
+          const eos = mask.lastIndexOf(1);
+          raw = raw.slice(eos * d, (eos + 1) * d);
+        }
+        const vec = new Float32Array(raw);
+        self.postMessage({ type: 'result', id, vec }, [vec.buffer]);
+      } catch(err) {
+        self.postMessage({ type: 'error', id: msg.id, msg: err.message });
+      }
+    }
+  };
+  </script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Pixory</title>
@@ -949,15 +1024,22 @@ class CLIPTokenizer {
   }
 }
 
+// ── ONNX Worker factory ───────────────────────────────────────────────────
+function createOnnxWorker() {
+  const ortUrl = "https://pub-d8a218c4d660421f80ca496a2dd69f5f.r2.dev/ort.min.js";
+  const src = document.getElementById("onnx-worker-src").textContent
+    .replace("__ORT_URL__", JSON.stringify(ortUrl));
+  const blob = new Blob([src], { type: "application/javascript" });
+  return new Worker(URL.createObjectURL(blob));
+}
+
 async function loadCLIP() {
-  // Force UI to render each step (RAF + setTimeout 0 = next paint)
+  const isReady = () => document.getElementById("state-ready")
+    ?.classList.contains("active");
   const yieldUI = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
   const step = async (msg) => {
     console.log("[Pixory]", msg);
-    // If Browse is already visible (state-ready), update status-bar only —
-    // don't overwrite the whole UI with the loading overlay.
-    const isReady = document.getElementById("state-ready")?.classList.contains("active");
-    if (isReady) {
+    if (isReady()) {
       const sb = document.getElementById("status-bar");
       if (sb) sb.textContent = msg;
     } else {
@@ -1044,29 +1126,56 @@ async function loadCLIP() {
   const tj = await (await fetch(R2 + "tokenizer.json")).json();
   const tokenizer = new CLIPTokenizer(tj.model.vocab, tj.model.merges);
 
-  // ── ONNX session (slow on iPhone — 10–30 sec) ─────────────────────────────
+  // ── ONNX session via Worker (non-blocking compilation) ───────────────────
+  // ort.InferenceSession.create() blocks the JS thread for ~30s on mobile.
+  // Running it in a Worker keeps the main thread free for IntersectionObserver
+  // (browse scroll) and any other UI interactions during the wait.
   await step("Compiling AI model (10-30 sec)…");
-  let session;
-  try {
-    session = await ort.InferenceSession.create(modelBuffer,
-      { executionProviders: ["wasm"] });
-  } catch(e1) {
-    await step("Retrying without SIMD…");
+  let _worker = null;
+  let _pendingRuns = new Map(); // id → {resolve, reject}
+  let _runId = 0;
+  let workerInputNames = [];
+
+  await new Promise((resolve, reject) => {
     try {
-      ort.env.wasm.simd = false;
-      session = await ort.InferenceSession.create(modelBuffer,
-        { executionProviders: ["wasm"] });
-    } catch(e2) {
-      throw new Error("ONNX init failed: " + e2.message);
+      _worker = createOnnxWorker();
+    } catch(e) {
+      // Worker creation can fail in some Telegram WebView sandboxes
+      reject(new Error("Worker unavailable: " + e.message));
+      return;
     }
-  }
+    _worker.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'ready') {
+        workerInputNames = msg.inputNames;
+        console.log("[Pixory] ONNX Worker ready | inputs:", msg.inputNames,
+                    "| outputs:", msg.outputNames);
+        resolve();
+      } else if (msg.type === 'result') {
+        const p = _pendingRuns.get(msg.id);
+        if (p) { _pendingRuns.delete(msg.id); p.resolve(msg.vec); }
+      } else if (msg.type === 'error') {
+        const p = _pendingRuns.get(msg.id);
+        if (p) { _pendingRuns.delete(msg.id); p.reject(new Error(msg.msg)); }
+        else reject(new Error("Worker init failed: " + msg.msg));
+      }
+    };
+    _worker.onerror = (e) => reject(new Error("Worker error: " + e.message));
+    // Transfer modelBuffer to Worker (zero-copy)
+    _worker.postMessage({
+      type: 'init',
+      modelBuffer,
+      wasmPaths: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/",
+    }, [modelBuffer]);
+    // modelBuffer is now transferred (neutered in main thread) — free memory
+    modelBuffer = null;
+  });
+
   await step("AI ready ✓");
 
-  // Inspect what the ONNX model expects/returns
-  const inputNames  = session.inputNames  || [];
-  const outputNames = session.outputNames || [];
+  const inputNames = workerInputNames;
+  const outputNames = []; // not needed in main thread
   console.log("[Pixory] ONNX inputs:", inputNames);
-  console.log("[Pixory] ONNX outputs:", outputNames);
 
   // Cache: which output name to use (decided on first run from actual dims)
   let _bestOutputKey = null;
@@ -1074,87 +1183,31 @@ async function loadCLIP() {
 
   window._encodeText = async (query) => {
     const {inputIds, attMask} = tokenizer.tokenize(query);
-    const n = inputIds.length;
 
-    // Build feeds based on what the model actually wants (skip unknown inputs)
-    const feeds = {};
-    for (const name of inputNames) {
-      if (name === "input_ids" || name === "tokens" || name === "ids") {
-        feeds[name] = new ort.Tensor("int64", BigInt64Array.from(inputIds, BigInt), [1,n]);
-      } else if (name === "attention_mask" || name === "mask") {
-        feeds[name] = new ort.Tensor("int64", BigInt64Array.from(attMask, BigInt), [1,n]);
-      }
-    }
-    // Fallback when inputNames is empty
-    if (Object.keys(feeds).length === 0) {
-      feeds.input_ids = new ort.Tensor("int64", BigInt64Array.from(inputIds, BigInt), [1,n]);
-    }
-
-    const out = await session.run(feeds);
-
-    // Pick output with the right shape on FIRST call, then cache the name
-    if (!_bestOutputKey) {
-      // Priority: text_embeds > pooler_output > any 2D [1, D] output
-      // REJECT 3D outputs (like last_hidden_state which is [1, 77, 768])
-      const priority = ["text_embeds", "pooler_output", "last_hidden_state"];
-      let candidates = [];
-      for (const name of Object.keys(out)) {
-        const t = out[name];
-        const dims = t.dims || [];
-        const is2D = dims.length === 2;
-        candidates.push({name, dims, is2D, data: t.data});
-        console.log(`[Pixory] output "${name}" dims:`, dims, "len:", t.data.length);
-      }
-      // Prefer 2D outputs by priority name
-      for (const p of priority) {
-        if (candidates.find(c => c.name === p && c.is2D)) {
-          _bestOutputKey = p; break;
-        }
-      }
-      // Fallback: first 2D output
-      if (!_bestOutputKey) {
-        const c2d = candidates.find(c => c.is2D);
-        if (c2d) _bestOutputKey = c2d.name;
-      }
-      // Last resort: just use last output
-      if (!_bestOutputKey) _bestOutputKey = Object.keys(out).at(-1);
-      console.log("[Pixory] Selected output:", _bestOutputKey);
+    // Send token arrays to Worker, await Float32Array result.
+    // Worker handles session.run, output selection, and EOS extraction.
+    const runId = _runId++;
+    const vec = await new Promise((resolve, reject) => {
+      _pendingRuns.set(runId, { resolve, reject });
+      _worker.postMessage({ type: 'run', id: runId,
+        inputIds: Array.from(inputIds),
+        attMask:  Array.from(attMask) });
+    });
+    // _bestOutputKey no longer needed — Worker handles it.
+    // Log dims once for diagnostics
+    if (!_diagLogged) {
+      _diagLogged = true;
+      console.log("[Pixory] Query vec dim:", vec.length,
+        "min:", Math.min(...vec).toFixed(3),
+        "max:", Math.max(...vec).toFixed(3),
+        "first5:", Array.from(vec.slice(0,5)).map(x=>x.toFixed(3)));
     }
 
-    // Extract embedding from chosen output
-    let vec = new Float32Array(out[_bestOutputKey].data);
-
-    // If we ended up with a 3D last_hidden_state, extract EOS token embedding
-    // (the last non-pad token's hidden state — CLIP's actual text representation)
-    const dims = out[_bestOutputKey].dims || [];
-    if (dims.length === 3 && dims[2] === 768) {
-      // Find EOS position (last 1 in attention mask)
-      let eosPos = 0;
-      for (let i = n - 1; i >= 0; i--) if (attMask[i] === 1) { eosPos = i; break; }
-      const slice = new Float32Array(768);
-      const base = eosPos * 768;
-      for (let i = 0; i < 768; i++) slice[i] = vec[base + i];
-      vec = slice;
-      if (!_diagLogged) {
-        console.log("[Pixory] Extracted EOS token at pos", eosPos);
-        _diagLogged = true;
-      }
-    }
-
-    // L2 normalize for cosine similarity
+    // L2-normalize (Worker returns raw output; normalization done here)
     let norm = 0;
     for (let i = 0; i < vec.length; i++) norm += vec[i] * vec[i];
     norm = Math.sqrt(norm);
     if (norm > 1e-8) for (let i = 0; i < vec.length; i++) vec[i] /= norm;
-
-    // Diagnostic: log query vector stats once
-    if (!_diagLogged) {
-      console.log("[Pixory] Query vec dim:", vec.length,
-                  "min:", Math.min(...vec).toFixed(3),
-                  "max:", Math.max(...vec).toFixed(3),
-                  "first5:", Array.from(vec.slice(0,5)).map(x => x.toFixed(3)));
-      _diagLogged = true;
-    }
 
     return vec;
   };
@@ -1165,17 +1218,20 @@ async function loadCLIP() {
   // so pre-warming them removes 4× ONNX cost from the first user query.
   try {
     await window._encodeText("photo");
-    // Pre-encode negative anchors + null vector — used on EVERY search, free after first
     for (const anchor of [
       "a photo of shoes on the floor",
       "a photo of a plastic bottle",
       "a screenshot of text on a screen",
       "a photo of furniture in a room",
-      "a photo",   // null-query subtraction anchor
+      "a photo",
+      "a photo of a woman",
+      "a photo of a girl",
+      "a photo of a man",
+      "a photo of a boy",
     ]) {
       try { await window._encodeText(anchor); } catch(_) {}
     }
-    console.log("[Pixory] Pre-warm OK (1 dummy + 4 negative + 1 null) — first search will be fast");
+    console.log("[Pixory] Pre-warm OK — first search will be fast");
   } catch(e) {
     console.warn("[Pixory] Pre-warm failed:", e.message);
   }
@@ -1416,17 +1472,22 @@ async function init() {
     try { detectHubs(); } catch(e) { console.warn("[Pixory] hub detect failed:", e); }
 
     // ── Show Browse immediately ────────────────────────────────────────────
-    // Switch to ready state and render Browse BEFORE loading the AI model.
-    // loadCLIP is kicked off via setTimeout so the browser paints the Browse
-    // grid first (setState → repaint → setTimeout fires → loadCLIP starts).
     setState("state-ready");
     try { startBrowse(); switchTab('browse'); } catch(e) { console.error('browse init:', e); }
 
-    // Disable search input with a placeholder while model loads in background
+    // Disable search input while model loads
     const si = document.getElementById("search-input");
     if (si) { si.disabled = true; si.placeholder = "Loading AI… (browse freely)"; }
 
-    // Yield to browser paint, then start model load
+    // TODO Sprint 4: move ONNX session creation to a Web Worker.
+    // Currently ort.InferenceSession.create() blocks the JS thread for ~30s
+    // (WASM JIT compilation) — IntersectionObserver cannot fire during that
+    // time, so browse infinite-scroll freezes after the first batch.
+    // The fix is: postMessage the model ArrayBuffer to a Worker, compile
+    // there, then proxy _encodeText calls back via MessageChannel.
+    // Until then, keep BROWSE_BATCH large enough to fill one screen.
+
+    // Yield to browser paint before ONNX starts
     await new Promise(r => setTimeout(r, 50));
 
     try {
@@ -2138,18 +2199,30 @@ async function runSearch(query) {
     const qv = new Float32Array(qvCached); // defensive copy
 
     // ── NEGATIVE PROMPTING — subtract known false-friends ─────────────────
-    // Pre-warmed at init → these textEmbed() calls are instant cache hits.
-    // Also copy each anchor vector before reading — same cache-mutation guard.
+    // Global anchors (pre-warmed at init):
     const NEGATIVE_ANCHORS = [
       "a photo of shoes on the floor",
       "a photo of a plastic bottle",
       "a screenshot of text on a screen",
       "a photo of furniture in a room",
     ];
+    // Query-specific anchors: gender disambiguation.
+    // CLIP conflates 'man'/'boy' with any person photo (heavy gender bias).
+    // Subtracting the opposite gender pushes the query toward the right sex.
+    const q = translatedQ.toLowerCase();
+    const GENDER_NEGATIVES = {
+      'boy':   ["a photo of a woman", "a photo of a girl"],
+      'man':   ["a photo of a woman", "a photo of a girl"],
+      'girl':  ["a photo of a man",   "a photo of a boy"],
+      'woman': ["a photo of a man",   "a photo of a boy"],
+      'men':   ["a photo of a woman", "a photo of a girl"],
+      'women': ["a photo of a man",   "a photo of a boy"],
+    };
+    const extraNegatives = GENDER_NEGATIVES[q] || [];
     if (USE_NEGATIVE_PROMPTING) {
-      for (const anchor of NEGATIVE_ANCHORS) {
+      for (const anchor of [...NEGATIVE_ANCHORS, ...extraNegatives]) {
         try {
-          const nv = await textEmbed(anchor); // read-only, no copy needed
+          const nv = await textEmbed(anchor);
           for (let k = 0; k < qv.length; k++) qv[k] -= NEGATIVE_WEIGHT * nv[k];
         } catch(_) {}
       }
@@ -2311,7 +2384,12 @@ async function runSearch(query) {
         top = [];
         if (sr < 2.5) console.log(`[Pixory] No results: sr=${sr.toFixed(2)} < 2.5`);
       } else {
-        const floor = Math.max(mean + 1.0 * sigma, best * 0.75);
+        // Adaptive floor: when sr is high (confident match exists) use a
+        // stricter relative floor to cut the noise tail more aggressively.
+        // dog: sr=3.54 → floor = mean + 1.5σ (cuts shoes/cats below the gap)
+        // baby: sr=2.71 → floor = mean + 1.0σ (gentler, more recall)
+        const kSigma = sr >= 3.0 ? 1.5 : 1.0;
+        const floor = Math.max(mean + kSigma * sigma, best * 0.78);
         top = scored.filter(r => r.score >= floor);
         if (cliffIdx < top.length) top = top.slice(0, cliffIdx);
         if (top.length > 100) top = top.slice(0, 100);
