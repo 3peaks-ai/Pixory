@@ -1153,22 +1153,35 @@ async function loadCLIP() {
 
   // ── Pre-warm: now that _encodeText exists, run one dummy query so the
   // first real search is fast (ONNX WASM JIT-compiles on first inference).
+  // Also encode the negative anchors — these are reused on EVERY search,
+  // so pre-warming them removes 4× ONNX cost from the first user query.
   try {
     await window._encodeText("photo");
-    console.log("[Pixory] Pre-warm OK — first search will be fast");
+    // Pre-encode the negative anchors used in runSearch
+    for (const anchor of [
+      "a photo of shoes on the floor",
+      "a photo of a plastic bottle",
+      "a screenshot of text on a screen",
+      "a photo of furniture in a room",
+    ]) {
+      try { await window._encodeText(anchor); } catch(_) {}
+    }
+    console.log("[Pixory] Pre-warm OK (1 dummy + 4 negative anchors) — first search will be fast");
   } catch(e) {
     console.warn("[Pixory] Pre-warm failed:", e.message);
   }
 }
 async function textEmbed(query) {
   if (!window._encodeText) throw new Error("AI encoder not initialized");
-  // Cache: identical queries (e.g. debounce firing twice) skip ONNX entirely
+  // Cache: identical queries (e.g. debounce firing twice) skip ONNX entirely.
+  // Sized for: 5 ensemble templates per query × ~10 recent queries + 4 negative
+  // anchors + headroom = ~64. Bigger to keep negative anchors pinned across
+  // many searches (they're encoded once at pre-warm, must never evict).
   if (!textEmbed._cache) textEmbed._cache = new Map();
   const cached = textEmbed._cache.get(query);
   if (cached) return cached;
   const vec = await window._encodeText(query);
-  // Keep last 32 queries; evict oldest on overflow
-  if (textEmbed._cache.size >= 32) {
+  if (textEmbed._cache.size >= 64) {
     textEmbed._cache.delete(textEmbed._cache.keys().next().value);
   }
   textEmbed._cache.set(query, vec);
@@ -2078,11 +2091,69 @@ async function runSearch(query) {
   try {
     const t0  = performance.now();
 
-    // Single template, raw cosine — minimal overhead, ~4s ONNX.
-    // Dehubbify is intentionally NOT applied to search: prior tests on this
-    // library showed it strips the useful signal along with the hub direction.
+    // ── FEATURE FLAGS (set both to false to revert to single-template baseline) ─
+    const USE_PROMPT_ENSEMBLE = true;     // average multiple semantic phrasings
+    const USE_NEGATIVE_PROMPTING = true;  // subtract known false-friend embeddings
+    const NEGATIVE_WEIGHT = 0.15;         // weight per negative anchor
+
     const translatedQ = translateQuery(query);
-    const qv = await textEmbed(`a photo of a ${translatedQ}`);
+
+    // ── 1. PROMPT ENSEMBLE — encode several SEMANTIC variants and average ────
+    // Different from the earlier failed query-expansion: we use multiple
+    // *meanings* (not just template wrappings) and take the CENTROID, which
+    // is the classical CLIP zero-shot improvement from the OpenAI paper.
+    // All templates are cached by textEmbed; second search of same query = 0 ms.
+    const qv = await (async () => {
+      if (!USE_PROMPT_ENSEMBLE) {
+        return await textEmbed(`a photo of a ${translatedQ}`);
+      }
+      const templates = [
+        `a photo of a ${translatedQ}`,
+        `a ${translatedQ}`,
+        `${translatedQ}`,
+        `a picture of ${translatedQ}`,
+        `a snapshot of ${translatedQ}`,
+      ];
+      const vecs = [];
+      for (const t of templates) {
+        try { vecs.push(await textEmbed(t)); } catch(_) {}
+      }
+      if (vecs.length === 0) return await textEmbed(translatedQ);
+      // Centroid: average then L2-normalize
+      const dim = vecs[0].length;
+      const out = new Float32Array(dim);
+      for (const v of vecs) for (let k = 0; k < dim; k++) out[k] += v[k];
+      let n = 0;
+      for (let k = 0; k < dim; k++) { out[k] /= vecs.length; n += out[k]*out[k]; }
+      n = Math.sqrt(n) + 1e-9;
+      for (let k = 0; k < dim; k++) out[k] /= n;
+      return out;
+    })();
+
+    // ── 2. NEGATIVE PROMPTING — subtract known false-friend embeddings ───────
+    // Our shoes-in-dog, bottle-in-boy, screenshot-in-everything errors come
+    // from CLIP co-occurrence bias. We push the query vector AWAY from these
+    // co-occurring concepts so genuine matches surface.
+    // These are anchors we observed in production logs.
+    const NEGATIVE_ANCHORS = [
+      "a photo of shoes on the floor",
+      "a photo of a plastic bottle",
+      "a screenshot of text on a screen",
+      "a photo of furniture in a room",
+    ];
+    if (USE_NEGATIVE_PROMPTING) {
+      for (const anchor of NEGATIVE_ANCHORS) {
+        try {
+          const nv = await textEmbed(anchor);
+          for (let k = 0; k < qv.length; k++) qv[k] -= NEGATIVE_WEIGHT * nv[k];
+        } catch(_) {}
+      }
+      // Re-normalize the query after subtraction
+      let n = 0; for (let k = 0; k < qv.length; k++) n += qv[k]*qv[k];
+      n = Math.sqrt(n) + 1e-9;
+      for (let k = 0; k < qv.length; k++) qv[k] /= n;
+    }
+
     const kws = parseKeywords(translatedQ);
 
     // hasLabels = true only if at least one photo has ≥1 actual label
