@@ -1069,19 +1069,17 @@ async function loadCLIP() {
   if (typeof ort === "undefined") throw new Error("ort.min.js not loaded");
 
   // ── Check IndexedDB cache ──────────────────────────────────────────────────
-  // Model key: "clip-b32-v1" — changed from "clip-l14-v1" to force re-download
-  // when users had L/14 cached. B/32 = ~35MB (vs 124MB), inference ~1s (vs 4s).
-  const MODEL_CACHE_KEY = "clip-b32-v1";
+  // L/14 until shard is re-indexed with B/32 vision encoder.
+  // Switching browser model to B/32 while shard still has 768-dim L/14 vectors
+  // gives cosine(512-dim, 768-dim) = garbage. Swap both atomically.
+  const MODEL_CACHE_KEY = "clip-l14-v1";
   await step("Checking cache…");
   let modelBuffer = null;
   try {
     modelBuffer = await Promise.race([
       new Promise(res => {
-        const req = indexedDB.open("pixory-model", 2); // version bump clears old L/14
-        req.onupgradeneeded = e => {
-          const db = e.target.result;
-          if (!db.objectStoreNames.contains("m")) db.createObjectStore("m");
-        };
+        const req = indexedDB.open("pixory-model", 1);
+        req.onupgradeneeded = e => e.target.result.createObjectStore("m");
         req.onsuccess = e => {
           const r = e.target.result.transaction("m","readonly")
                      .objectStore("m").get(MODEL_CACHE_KEY);
@@ -1097,13 +1095,10 @@ async function loadCLIP() {
   } catch(e) { await step("No cache, downloading…"); }
 
   // ── Download with progress ─────────────────────────────────────────────────
-  // ViT-B/32 quantized text encoder — from Xenova CDN (public, no R2 needed)
-  // B/32 is publicly available at Xenova unlike L/14 which required R2.
-  const XENOVA_B32 = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/";
-  const MODEL_FILE = "onnx/text_model_quantized.onnx";
+  const MODEL_FILE = "onnx/text_model_quantized.onnx";  // L/14 from R2
   if (!modelBuffer) {
     await step("Connecting…");
-    const resp = await fetch(XENOVA_B32 + MODEL_FILE);
+    const resp = await fetch(R2 + MODEL_FILE);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
 
     const total = parseInt(resp.headers.get("content-length") || "0");
@@ -1151,8 +1146,7 @@ async function loadCLIP() {
 
   // ── Tokenizer ─────────────────────────────────────────────────────────────
   await step("Loading tokenizer (~2 MB)…");
-  // B/32 and L/14 share identical BPE tokenizer — confirmed by upload_b32_to_r2.py
-  const tj = await (await fetch(XENOVA_B32 + "tokenizer.json")).json();
+  const tj = await (await fetch(R2 + "tokenizer.json")).json();
   const tokenizer = new CLIPTokenizer(tj.model.vocab, tj.model.merges);
 
   // ── ONNX session via Worker (non-blocking compilation) ───────────────────
@@ -2265,6 +2259,28 @@ async function runSearch(query) {
     }
 
     const kws = parseKeywords(translatedQ);
+
+    // DIMENSION MISMATCH CHECK: query vector must match stored image vectors.
+    // B/32 text = 512-dim, L/14 text = 768-dim.
+    // If the shard was indexed with L/14 but the browser loaded B/32 text model,
+    // cosine similarity is meaningless (different vector spaces).
+    if (cachedVecs && cachedVecs.length > 0) {
+      const storedDim = cachedVecs[0].length;
+      const queryDim  = qv.length;
+      if (storedDim !== queryDim) {
+        const grid = document.getElementById("results-grid");
+        if (grid) grid.innerHTML =
+          `<div style="grid-column:1/-1;padding:24px;color:#FF453A;font-size:13px">
+           ⚠️ Model mismatch: shard has ${storedDim}-dim vectors (CLIP L/14) but
+           browser loaded ${queryDim}-dim model (CLIP B/32).<br><br>
+           Please re-index your photos with the B/32 vision encoder, then re-import
+           the new shard. Search is disabled until shard is rebuilt.
+          </div>`;
+        const sb = document.getElementById("status-bar");
+        if (sb) sb.textContent = `Re-index required (dim mismatch: ${storedDim} vs ${queryDim})`;
+        return;
+      }
+    }
 
     // hasLabels = true only if at least one photo has ≥1 actual label
     const hasLabels = !!(cachedLabels &&
