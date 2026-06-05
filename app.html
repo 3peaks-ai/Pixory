@@ -216,7 +216,7 @@ body {
 }
 .results-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 2px;
   padding: 0 0 72px;
   width: 100%;
@@ -1455,6 +1455,7 @@ let cachedDates  = null;
 let cachedThumbs = null;
 let cachedCC     = null;
 let cachedLabels = null; // Array of Uint8Array (label binary per photo, may be null)
+let cachedVlmCaptions = null; // Array<string|null> — Moondream captions (shard v3.2, optional)
 
 async function init() {
   // Force dark theme (Telegram may default to light)
@@ -2187,14 +2188,159 @@ const RU_EN = {
   "цветы":"flowers","дерево":"tree","трава":"grass",
 };
 
-function translateQuery(q) {
-  // Replace Russian words with English equivalents
-  let result = q.toLowerCase();
-  // Sort by length descending to match longer phrases first
-  const entries = Object.entries(RU_EN).sort((a,b) => b[0].length - a[0].length);
-  for (const [ru, en] of entries) {
-    result = result.replace(new RegExp(ru, 'g'), en);
+// ── CONCEPT DICTIONARY ────────────────────────────────────────────────────────
+// keywords[]    — what users TYPE in their language (8 Telegram target languages)
+// vlm_targets[] — what Moondream WRITES in English captions for this concept
+//
+// Two uses:
+//   1. lookupConcept(query) → translates any language query to canonical English
+//      concept key, replacing the old RU-only translateQuery approach.
+//   2. captionMatchesConcept(caption, entry) → ghost elimination: if a photo has
+//      a VLM caption and the concept is NOT found in it → score = 0.
+//
+// Extend by adding entries — no other code changes needed.
+// ─────────────────────────────────────────────────────────────────────────────
+const CONCEPT_DICTIONARY = {
+  baby: {
+    keywords: ["baby","newborn","infant","babies","säugling","neugeborenes","bébé","nourrisson","nouveau-né","bebé","recién nacido","младенец","новорождённый","малыш","грудничок","нвоорождённый","نوزاد","بچه","شیرخوار","رضيع","مولود","طفل رضيع","婴儿","新生儿","宝宝","宝贝"],
+    vlm_targets: ["baby","newborn","infant","toddler","tiny child","small child","young child","little one","crawling","onesie","cradle","crib","stroller","pram","diaper","pacifier","bottle feeding","breastfeeding"],
+    clip_query: "a photo of a baby",
+  },
+  child: {
+    keywords: ["child","kid","children","kids","kind","kinder","enfant","enfants","gamin","niño","niña","niños","chico","ребёнок","дети","ребята","малыш","کودک","بچه","طفل","أطفال","孩子","儿童","小孩","小朋友"],
+    vlm_targets: ["child","children","kid","kids","toddler","toddlers","young boy","young girl","little boy","little girl","schoolboy","schoolgirl","preschool","playground","school uniform"],
+    clip_query: "a photo of a child",
+  },
+  boy: {
+    keywords: ["boy","boys","junge","bub","garçon","niño","chico","muchacho","мальчик","парень","пацан","پسر","ولد","صبي","男孩","小男孩","男童"],
+    vlm_targets: ["boy","boys","young boy","little boy","male child","son","brother","schoolboy","lad"],
+    clip_query: "a photo of a boy",
+  },
+  girl: {
+    keywords: ["girl","girls","mädchen","fille","fillette","niña","chica","muchacha","девочка","девушка","دختر","بنت","فتاة","女孩","小女孩","女童"],
+    vlm_targets: ["girl","girls","young girl","little girl","female child","daughter","sister","schoolgirl"],
+    clip_query: "a photo of a girl",
+  },
+  woman: {
+    keywords: ["woman","women","lady","female","frau","frauen","femme","femmes","mujer","mujeres","señora","женщина","дама","тётя","زن","خانم","امرأة","سيدة","نساء","女人","女士","女性","妇女"],
+    vlm_targets: ["woman","women","lady","female","mother","mom","grandmother","she","her"],
+    clip_query: "a photo of a woman",
+  },
+  man: {
+    keywords: ["man","men","male","guy","mann","männer","herr","homme","hommes","hombre","hombres","señor","мужчина","мужик","дядя","مرد","آقا","رجل","رجال","男人","男士","男性"],
+    vlm_targets: ["man","men","male","guy","father","dad","grandfather","gentleman","he","his"],
+    clip_query: "a photo of a man",
+  },
+  pregnant: {
+    keywords: ["pregnant","pregnancy","expecting","schwanger","enceinte","grossesse","embarazada","embarazo","беременная","беременность","باردار","حاملگی","حامل","حمل","孕妇","怀孕","妊娠"],
+    vlm_targets: ["pregnant","pregnancy","baby bump","maternity","expecting","prenatal","round belly","large belly"],
+    clip_query: "a photo of a pregnant woman",
+  },
+  dog: {
+    keywords: ["dog","dogs","puppy","puppies","hound","hund","hunde","welpe","chien","chiens","chiot","perro","perros","cachorro","собака","пёс","щенок","пёсик","собачка","سگ","توله","كلب","كلاب","جرو","狗","小狗","狗狗","犬"],
+    vlm_targets: ["dog","dogs","puppy","puppies","canine","poodle","labrador","golden retriever","german shepherd","bulldog","dachshund","husky","terrier","spaniel","pug","beagle","leash","on a leash","walking a dog","dog walking"],
+    clip_query: "a photo of a dog",
+  },
+  cat: {
+    keywords: ["cat","cats","kitten","kittens","katze","katzen","kätzchen","chat","chats","chaton","gato","gatos","gatito","кот","кошка","котёнок","кошки","котик","گربه","بچه گربه","قط","قطط","هرة","猫","小猫","猫咪","喵"],
+    vlm_targets: ["cat","cats","kitten","kittens","feline","tabby","persian cat","siamese","stray cat"],
+    clip_query: "a photo of a cat",
+  },
+  sea: {
+    keywords: ["sea","ocean","beach","shore","coast","seaside","meer","ozean","strand","küste","mer","océan","plage","côte","mar","océano","playa","costa","море","океан","пляж","берег","морской","дریا","اقیانوس","ساحل","بحر","محيط","شاطئ","海","海滩","海洋","沙滩","海岸"],
+    vlm_targets: ["sea","ocean","beach","shore","coast","seaside","seashore","waves","surf","sand","sandy beach","beach umbrellas","water","lake","river","swimming pool","pool","pier","harbor","harbour","boat","sailboat","horizon"],
+    clip_query: "a photo of the sea",
+  },
+  mountain: {
+    keywords: ["mountain","mountains","hill","peak","summit","alps","berg","berge","gebirge","alpen","montagne","montagnes","montaña","montañas","гора","горы","вершина","альпы","کوه","کوهستان","جبل","جبال","山","山脉","山峰","高山"],
+    vlm_targets: ["mountain","mountains","hill","hills","peak","summit","alpine","alps","hiking","trail","rocky","valley","snow-capped","cliff"],
+    clip_query: "a photo of mountains",
+  },
+  forest: {
+    keywords: ["forest","woods","trees","jungle","wald","forst","forêt","bois","bosque","selva","лес","роща","джунгли","جنگل","غابة","أشجار","森林","树林","丛林"],
+    vlm_targets: ["forest","woods","trees","woodland","jungle","park","trail","path through trees","canopy","foliage","greenery"],
+    clip_query: "a photo of a forest",
+  },
+  snow: {
+    keywords: ["snow","winter","ice","frost","blizzard","schnee","eis","neige","hiver","glace","nieve","invierno","hielo","снег","зима","лёд","мороз","برف","زمستان","ثلج","شتاء","雪","冬天","冰"],
+    vlm_targets: ["snow","snowy","winter","ice","frost","blizzard","snowflakes","snowman","ski","skiing","snowboard","white ground","frozen","icy"],
+    clip_query: "a photo of snow",
+  },
+  car: {
+    keywords: ["car","cars","vehicle","automobile","truck","bus","auto","fahrzeug","lkw","voiture","véhicule","camion","coche","carro","vehículo","camión","машина","авто","автомобиль","грузовик","ماشین","خودرو","سيارة","مركبة","شاحنة","汽车","车","轿车","卡车"],
+    vlm_targets: ["car","cars","vehicle","automobile","truck","bus","van","suv","sedan","parked","driving","highway","road","traffic","parking lot","wheels","windshield"],
+    clip_query: "a photo of a car",
+  },
+  bicycle: {
+    keywords: ["bicycle","bike","cycling","cyclist","fahrrad","fahrräder","rad","vélo","vélos","cycliste","bicicleta","ciclista","велосипед","велик","велосипедист","دوچرخه","دراجة","دراجات","自行车","单车","骑车"],
+    vlm_targets: ["bicycle","bike","cycling","cyclist","riding a bike","bicycle lane","handlebars","pedaling"],
+    clip_query: "a photo of a bicycle",
+  },
+  food: {
+    keywords: ["food","meal","dish","eat","lunch","dinner","breakfast","essen","mahlzeit","gericht","nourriture","repas","manger","comida","plato","comer","еда","блюдо","обед","ужин","завтрак","кушать","غذا","خوردن","طعام","أكل","وجبة","食物","餐","吃","午餐","晚餐","早餐"],
+    vlm_targets: ["food","meal","dish","plate","bowl","eating","dining","restaurant","kitchen","cooking","breakfast","lunch","dinner","cake","pizza","salad","soup","bread","fruit","vegetables","dessert","sandwich"],
+    clip_query: "a photo of food",
+  },
+  shoes: {
+    keywords: ["shoes","shoe","boots","sneakers","sandals","slippers","schuhe","stiefel","turnschuhe","chaussures","bottes","baskets","zapatos","botas","zapatillas","туфли","ботинки","кроссовки","тапки","сандалии","обувь","کفش","چکمه","دمپایی","حذاء","أحذية","صندل","鞋","靴子","运动鞋","凉鞋"],
+    vlm_targets: ["shoes","shoe","boots","sneakers","sandals","slippers","footwear","heels","loafers","flip flops","trainers","on the floor","pair of shoes"],
+    clip_query: "a photo of shoes",
+  },
+  sleeping: {
+    keywords: ["sleeping","sleep","asleep","nap","rest","schlafen","schlaf","dormir","sommeil","сон","спит","спать","дремлет","خواب","خوابیدن","نوم","نائم","睡觉","睡眠","打盹"],
+    vlm_targets: ["sleeping","asleep","napping","resting","lying down","eyes closed","in bed","on a couch","blanket","pillow"],
+    clip_query: "a photo of someone sleeping",
+  },
+  birthday: {
+    keywords: ["birthday","bday","geburtstag","anniversaire","cumpleaños","день рождения","днюха","др","تولد","عيد ميلاد","生日","生日快乐"],
+    vlm_targets: ["birthday","birthday cake","birthday candles","candles on cake","celebration","party","happy birthday","balloons","gifts","presents","festive"],
+    clip_query: "a birthday party photo",
+  },
+  holiday: {
+    keywords: ["holiday","christmas","xmas","new year","vacation","weihnachten","urlaub","ferien","noël","vacances","navidad","vacaciones","рождество","новый год","праздник","отпуск","каникулы","کریسمس","تعطیلات","عيد الميلاد","رأس السنة","圣诞节","新年","假期","节日"],
+    vlm_targets: ["christmas","holiday","celebration","festive","decorated","christmas tree","lights","ornaments","new year","fireworks"],
+    clip_query: "a holiday celebration photo",
+  },
+  document: {
+    // Used for GHOST ELIMINATION: these should NEVER appear in semantic search
+    keywords: ["document","screenshot","screen","text","paper","form","dokument","bildschirm","документ","скриншот","форма","سند","وثيقة","文件","截图"],
+    vlm_targets: ["document","form","screen","text","paper","page","printed","typed","handwritten","certificate","letter","receipt","invoice","contract","label","computer screen","monitor","phone screen","display","spreadsheet","website","interface"],
+    clip_query: null, // not used for search — only for negative filtering
+  },
+};
+
+// Look up which concept (if any) matches the user query.
+// Returns { key, entry } or null. Bidirectional substring match handles
+// plurals, typos, and partial words across all 8 languages.
+function lookupConcept(userQuery) {
+  const q = userQuery.trim().toLowerCase();
+  if (!q || q.length < 2) return null;
+  for (const [key, entry] of Object.entries(CONCEPT_DICTIONARY)) {
+    for (const kw of entry.keywords) {
+      const k = kw.toLowerCase();
+      if (q === k || q.includes(k) || k.includes(q)) return { key, entry };
+    }
   }
+  return null;
+}
+
+// Check if a VLM caption contains any of the concept's expected words.
+// Returns true = photo is relevant; false = ghost (score should be zeroed).
+function captionMatchesConcept(caption, entry) {
+  if (!caption) return true; // no caption = no VLM data = don't penalise
+  const c = caption.toLowerCase();
+  return entry.vlm_targets.some(t => c.includes(t.toLowerCase()));
+}
+
+// ── Query translation (replaced by CONCEPT_DICTIONARY lookup above) ──────────
+// Kept as thin wrapper for backward compatibility with any remaining callers.
+function translateQuery(q) {
+  const concept = lookupConcept(q);
+  if (concept) return concept.key; // return canonical English key
+  // Fallback: old RU→EN table for queries not yet in CONCEPT_DICTIONARY
+  let result = q.toLowerCase();
+  const entries = Object.entries(RU_EN).sort((a,b) => b[0].length - a[0].length);
+  for (const [ru, en] of entries) result = result.replace(new RegExp(ru, 'g'), en);
   return result;
 }
 
@@ -2213,13 +2359,12 @@ async function runSearch(query) {
   const NEGATIVE_WEIGHT        = 0.15;
 
     const translatedQ = translateQuery(query);
+    const concept     = lookupConcept(query);          // null if unknown concept
+    const clipQuery   = concept?.entry.clip_query ?? `a photo of a ${translatedQ}`;
 
-    // CRITICAL: always copy the cached vector before modifying.
-    // textEmbed() returns the same Float32Array from cache every call.
-    // Mutating it in-place means the 2nd search applies negatives to an
-    // already-modified vector → progressive corruption → ratio=0.00 → 0 results.
-    const qvCached = await textEmbed(`a photo of a ${translatedQ}`);
-    const qv = new Float32Array(qvCached); // defensive copy
+    // Encode: use concept's optimised CLIP prompt if available, else generic
+    const qvCached = await textEmbed(clipQuery);
+    const qv = new Float32Array(qvCached);
 
     // ── NEGATIVE PROMPTING — subtract known false-friends ─────────────────
     // Global anchors (pre-warmed at init):
@@ -2299,89 +2444,36 @@ async function runSearch(query) {
       const hubP = _hubPenalty ? _hubPenalty[i] : 0;
       const clip = bestClip * (1 - hubP);
 
-      if (hasLabels && kws.length > 0 && cachedLabels[i]) {
+      // ── Hard filter: screenshots/documents ───────────────────────────────
+      if (hasLabels && cachedLabels[i]) {
         const labels = parseLabels(cachedLabels[i]);
-        if (labels.length > 0) {
-          // Hard filter: photo labeled as screenshot/document/UI
-          // Threshold 0.08 = minimum label score stored (min_score in generate_labels)
-          // Any screenshot label present at all → exclude from search results
-          if (labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.08))
-            continue;
-
-          // Synonym expansion: query word → related LABEL_VOCAB terms
-          const SYNONYMS = {
-            "baby":["baby","infant","toddler","child","boy","girl"],
-            "kid":["child","boy","girl","baby","toddler","infant"],
-            "child":["child","baby","infant","toddler","boy","girl"],
-            "children":["child","boy","girl","baby","toddler"],
-            "boy":["boy","child","baby","toddler"],
-            "girl":["girl","child","baby","toddler"],
-            "sea":["ocean or sea","beach","swimming pool"],
-            "ocean":["ocean or sea","beach"],
-            "beach":["beach","ocean or sea","swimming pool"],
-            "pool":["swimming pool","beach"],
-            "swim":["swimming","swimming pool","ocean or sea"],
-            "sleep":["sleeping"],
-            "eat":["eating food"],
-            "drink":["drinking"],
-            "play":["playing"],
-            "run":["running"],
-            "smile":["smiling"],
-            "laugh":["laughing"],
-            "cry":["crying"],
-            "hug":["hugging"],
-            "birthday":["birthday celebration"],
-            "holiday":["holiday celebration"],
-            "xmas":["holiday celebration"],
-            "christmas":["holiday celebration"],
-            "snow":["snow landscape"],
-            "mountain":["mountains"],
-            "forest":["forest"],
-            "dog":["dog"],
-            "cat":["cat"],
-            "car":["car or vehicle"],
-            "home":["home interior","living room","bedroom","kitchen"],
-            "house":["home interior"],
-            "kitchen":["kitchen"],
-            "bedroom":["bedroom"],
-            "bathroom":["bathroom"],
-          };
-
-          // Labels are NOISY and INCOMPLETE on this library:
-          //   - shoes have label "dog" (false positive in shard)
-          //   - baby photos lack "baby" label (false negative in shard)
-          // So we CANNOT use label match as a hard filter — it loses recall.
-          // We rank purely by CLIP cosine; a label match adds a small bonus
-          // to push genuinely-labeled matches above pure-cosine guesses.
-          let labelBonus = 0;
-          for (const kw of kws) {
-            const targets = SYNONYMS[kw] || [kw];
-            for (const [lbl, s] of labels) {
-              for (const t of targets) {
-                if ((lbl.includes(t) || t.includes(lbl.split(' ')[0])) && s > 0.20) {
-                  labelBonus = Math.max(labelBonus, 0.04);
-                }
-              }
-            }
-          }
-
-          // Hard filter ONLY for screenshots/documents (reliable signal)
-          if (labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.20))
-            continue;
-
-          scored.push({ score: clip + labelBonus, idx: i, path,
-                        date: cachedDates?.[i] ?? '' });
+        if (labels.length > 0 &&
+            labels.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.08))
           continue;
-        }
       }
 
-      // No labels for this photo: rank by CLIP cosine
-      if (cachedLabels[i]) {
-        const lbls = parseLabels(cachedLabels[i]);
-        if (lbls.some(([,s,id]) => NEGATIVE_LABEL_IDS.has(id) && s > 0.20)) continue;
+      // ── VLM GHOST ELIMINATION ─────────────────────────────────────────────
+      // If photo has a Moondream caption AND the query maps to a known concept,
+      // require at least one vlm_target in the caption.
+      // No caption → don't penalise (shard v3.1, VLM not yet run on this photo).
+      const vlmCaption = cachedVlmCaptions ? cachedVlmCaptions[i] : null;
+      if (concept && vlmCaption && !captionMatchesConcept(vlmCaption, concept.entry)) {
+        continue; // ghost: CLIP fired but VLM says it's something else
       }
-      scored.push({ score: clip, idx: i, path, date: cachedDates?.[i] ?? '' });
-    }
+
+      // ── Soft label bonus ──────────────────────────────────────────────────
+      let labelBonus = 0;
+      if (concept && hasLabels && cachedLabels[i]) {
+        const labels = parseLabels(cachedLabels[i]);
+        if (labels.some(([lbl, s]) => {
+          const key = concept.key;
+          return s > 0.20 && (lbl.includes(key) || key.includes(lbl.split(' ')[0]));
+        })) labelBonus = 0.03;
+      }
+
+      scored.push({ score: clip + labelBonus, idx: i, path,
+                    date: cachedDates?.[i] ?? '', vlm: vlmCaption });
+    } // end for
 
     // ── Relevance filtering by CLIP cosine distribution ───────────────────
     // All photos now share one score scale (CLIP cosine ~0.10-0.30).
@@ -2444,7 +2536,7 @@ async function runSearch(query) {
     }
     const ms = Math.round(performance.now() - t0);
     console.log('[Pixory]', JSON.stringify(query),
-      '| hasLabels:', hasLabels, '| kws:', kws,
+      '| concept:', concept?.key||'none',
       '| results:', top.length,
       '| best:', scored.length ? (scored[0].score*100|0)+'%' : 'n/a',
       '|', ms+'ms');
