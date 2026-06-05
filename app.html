@@ -1069,31 +1069,41 @@ async function loadCLIP() {
   if (typeof ort === "undefined") throw new Error("ort.min.js not loaded");
 
   // ── Check IndexedDB cache ──────────────────────────────────────────────────
+  // Model key: "clip-b32-v1" — changed from "clip-l14-v1" to force re-download
+  // when users had L/14 cached. B/32 = ~35MB (vs 124MB), inference ~1s (vs 4s).
+  const MODEL_CACHE_KEY = "clip-b32-v1";
   await step("Checking cache…");
   let modelBuffer = null;
   try {
     modelBuffer = await Promise.race([
       new Promise(res => {
-        const req = indexedDB.open("pixory-model", 1);
-        req.onupgradeneeded = e => e.target.result.createObjectStore("m");
+        const req = indexedDB.open("pixory-model", 2); // version bump clears old L/14
+        req.onupgradeneeded = e => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains("m")) db.createObjectStore("m");
+        };
         req.onsuccess = e => {
           const r = e.target.result.transaction("m","readonly")
-                     .objectStore("m").get("clip-l14-v1");
+                     .objectStore("m").get(MODEL_CACHE_KEY);
           r.onsuccess = () => res(r.result || null);
           r.onerror   = () => res(null);
         };
         req.onerror = () => res(null);
       }),
-      new Promise(res => setTimeout(() => res(null), 10000))  // 10s IDB timeout
+      new Promise(res => setTimeout(() => res(null), 10000))
     ]);
     if (modelBuffer)
       await step("AI model ready ✓");
   } catch(e) { await step("No cache, downloading…"); }
 
   // ── Download with progress ─────────────────────────────────────────────────
+  // ViT-B/32 quantized text encoder — from Xenova CDN (public, no R2 needed)
+  // B/32 is publicly available at Xenova unlike L/14 which required R2.
+  const XENOVA_B32 = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/";
+  const MODEL_FILE = "onnx/text_model_quantized.onnx";
   if (!modelBuffer) {
-    await step("Connecting to R2…");
-    const resp = await fetch(R2 + "onnx/text_model_quantized.onnx");
+    await step("Connecting…");
+    const resp = await fetch(XENOVA_B32 + MODEL_FILE);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
 
     const total = parseInt(resp.headers.get("content-length") || "0");
@@ -1127,18 +1137,22 @@ async function loadCLIP() {
 
     // Cache to IDB (fire-and-forget, don't block on it)
     try {
-      const req = indexedDB.open("pixory-model", 1);
-      req.onupgradeneeded = e => e.target.result.createObjectStore("m");
+      const req = indexedDB.open("pixory-model", 2);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains("m")) db.createObjectStore("m");
+      };
       req.onsuccess = e => {
-        const tx = e.target.result.transaction("m","readwrite");
-        tx.objectStore("m").put(modelBuffer, "clip-l14-v1");
+        e.target.result.transaction("m","readwrite")
+          .objectStore("m").put(modelBuffer, MODEL_CACHE_KEY);
       };
     } catch(e) {}
   }
 
   // ── Tokenizer ─────────────────────────────────────────────────────────────
   await step("Loading tokenizer (~2 MB)…");
-  const tj = await (await fetch(R2 + "tokenizer.json")).json();
+  // B/32 and L/14 share identical BPE tokenizer — confirmed by upload_b32_to_r2.py
+  const tj = await (await fetch(XENOVA_B32 + "tokenizer.json")).json();
   const tokenizer = new CLIPTokenizer(tj.model.vocab, tj.model.merges);
 
   // ── ONNX session via Worker (non-blocking compilation) ───────────────────
